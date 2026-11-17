@@ -4,14 +4,23 @@ const createUsersTableQuery = `
 CREATE TABLE IF NOT EXISTS users (
     id CHAR(36) PRIMARY KEY,
     name VARCHAR(255),
+    given_name VARCHAR(100),
+    family_name VARCHAR(100),
     email VARCHAR(255) UNIQUE,
     email_verified BOOLEAN DEFAULT FALSE,
     picture TEXT,
     locale VARCHAR(50),
     phone VARCHAR(50),
+    phone_verified BOOLEAN DEFAULT FALSE,
     birthday VARCHAR(50),
+    gender VARCHAR(20),
+    country VARCHAR(100),
+    timezone VARCHAR(100),
+    profile_completed BOOLEAN DEFAULT FALSE,
     password VARCHAR(255),
     number VARCHAR(255),
+    last_login_at TIMESTAMP NULL,
+    login_count INT DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
@@ -38,6 +47,7 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     token_hash VARCHAR(128) UNIQUE NOT NULL,
     expires_at TIMESTAMP NOT NULL,
     revoked BOOLEAN DEFAULT FALSE,
+    revoked_at TIMESTAMP NULL,
     replaced_by VARCHAR(128),
     device_info VARCHAR(255),
     ip VARCHAR(100),
@@ -88,25 +98,52 @@ CREATE TABLE IF NOT EXISTS applications (
 );
 `;
 
+// Helper to add missing column safely if table already exists
+async function addColumnIfNotExists(table, column, definition) {
+    try {
+        await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        console.log(`Added column ${column} to ${table}`);
+    } catch (err) {
+        // Ignore error if column already exists (Error 1060)
+        if (err.errno !== 1060) {
+            console.warn(`Note on adding column ${column}:`, err.message);
+        }
+    }
+}
+
 (async () => {
     try {
         await pool.query(createUsersTableQuery);
-        console.log('✅ Table "users" created successfully!');
+        console.log('✅ Table "users" checked/created!');
+
+        // Ensure newly required columns exist on users
+        await addColumnIfNotExists("users", "given_name", "VARCHAR(100)");
+        await addColumnIfNotExists("users", "family_name", "VARCHAR(100)");
+        await addColumnIfNotExists("users", "phone_verified", "BOOLEAN DEFAULT FALSE");
+        await addColumnIfNotExists("users", "gender", "VARCHAR(20)");
+        await addColumnIfNotExists("users", "country", "VARCHAR(100)");
+        await addColumnIfNotExists("users", "timezone", "VARCHAR(100)");
+        await addColumnIfNotExists("users", "profile_completed", "BOOLEAN DEFAULT FALSE");
+        await addColumnIfNotExists("users", "last_login_at", "TIMESTAMP NULL");
+        await addColumnIfNotExists("users", "login_count", "INT DEFAULT 0");
 
         await pool.query(createAuthIdentitiesTableQuery);
-        console.log('✅ Table "auth_identities" created successfully!');
+        console.log('✅ Table "auth_identities" checked/created!');
 
         await pool.query(createRefreshTokensTableQuery);
-        console.log('✅ Table "refresh_tokens" created successfully!');
+        console.log('✅ Table "refresh_tokens" checked/created!');
+
+        // Ensure revoked_at exists on refresh_tokens
+        await addColumnIfNotExists("refresh_tokens", "revoked_at", "TIMESTAMP NULL");
 
         await pool.query(createItemsTableQuery);
-        console.log('✅ Table "items" created successfully!');
+        console.log('✅ Table "items" checked/created!');
 
         await pool.query(createJobsTableQuery);
-        console.log('✅ Table "jobs" created successfully!');
+        console.log('✅ Table "jobs" checked/created!');
 
         await pool.query(createApplicationsTableQuery);
-        console.log('✅ Table "applications" created successfully!');
+        console.log('✅ Table "applications" checked/created!');
     } catch (err) {
         console.error('❌ Error creating tables:', err);
     } finally {

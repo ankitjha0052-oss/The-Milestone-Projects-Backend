@@ -4,7 +4,6 @@ const {
   getRefreshCookieOptions,
   verifyGoogleIdToken,
   verifyAppleIdToken,
-  generateAppleClientSecret,
   findOrCreateUserWithIdentity,
   createSession,
   rotateRefreshToken,
@@ -36,6 +35,8 @@ router.post("/google", async (req, res, next) => {
       email: googleUser.email,
       emailVerified: googleUser.emailVerified,
       name: googleUser.name,
+      givenName: googleUser.givenName,
+      familyName: googleUser.familyName,
       picture: googleUser.picture,
       locale: googleUser.locale,
     });
@@ -53,7 +54,7 @@ router.post("/google", async (req, res, next) => {
   }
 });
 
-// 2. POST /auth/apple
+// 2. POST /auth/apple (Fix 6: Always trust verified token email, NOT client req.body.user.email)
 router.post("/apple", async (req, res, next) => {
   try {
     const { idToken, user: appleMeta } = req.body;
@@ -61,18 +62,25 @@ router.post("/apple", async (req, res, next) => {
 
     const appleUser = await verifyAppleIdToken(idToken);
 
+    // Name is sent by Apple only on first sign in
     let fullName = undefined;
+    let firstName = undefined;
+    let lastName = undefined;
     if (appleMeta && appleMeta.name) {
-      fullName = [appleMeta.name.firstName, appleMeta.name.lastName].filter(Boolean).join(" ").trim() || undefined;
+      firstName = appleMeta.name.firstName;
+      lastName = appleMeta.name.lastName;
+      fullName = [firstName, lastName].filter(Boolean).join(" ").trim() || undefined;
     }
 
-    const email = appleUser.email || (appleMeta && appleMeta.email);
+    // Security: Only verified email from Apple's signed JWT is trusted
     const user = await findOrCreateUserWithIdentity({
       provider: "apple",
       providerUserId: appleUser.sub,
-      email,
+      email: appleUser.email,
       emailVerified: appleUser.emailVerified,
       name: fullName,
+      givenName: firstName,
+      familyName: lastName,
       isPrivateEmail: appleUser.isPrivateEmail,
     });
 
@@ -89,7 +97,7 @@ router.post("/apple", async (req, res, next) => {
   }
 });
 
-// POST /auth/apple/callback
+// Fix 5: Apple Form POST Callback (Redirects to frontend with refresh cookie set)
 router.post("/apple/callback", async (req, res, next) => {
   try {
     const { id_token, user: rawUser } = req.body;
@@ -102,44 +110,45 @@ router.post("/apple/callback", async (req, res, next) => {
     }
 
     let fullName = undefined;
+    let firstName = undefined;
+    let lastName = undefined;
     if (appleMeta && appleMeta.name) {
-      fullName = [appleMeta.name.firstName, appleMeta.name.lastName].filter(Boolean).join(" ").trim() || undefined;
+      firstName = appleMeta.name.firstName;
+      lastName = appleMeta.name.lastName;
+      fullName = [firstName, lastName].filter(Boolean).join(" ").trim() || undefined;
     }
 
-    const email = appleUser.email || (appleMeta && appleMeta.email);
     const user = await findOrCreateUserWithIdentity({
       provider: "apple",
       providerUserId: appleUser.sub,
-      email,
+      email: appleUser.email, // Never client email
       emailVerified: appleUser.emailVerified,
       name: fullName,
+      givenName: firstName,
+      familyName: lastName,
       isPrivateEmail: appleUser.isPrivateEmail,
     });
 
-    const { accessToken, refreshToken } = await createSession(
+    const { refreshToken } = await createSession(
       user.id,
       req.headers["user-agent"],
       req.ip
     );
 
     res.cookie("refreshToken", refreshToken, getRefreshCookieOptions());
-    res.json({ accessToken, user });
+
+    // Redirect smoothly to frontend auth success page
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+    res.redirect(`${frontendUrl}/auth/success`);
   } catch (err) {
-    next(err);
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+    res.redirect(`${frontendUrl}/auth/error?message=${encodeURIComponent(err.message)}`);
   }
 });
 
-// GET /auth/apple/client-secret
-router.get("/apple/client-secret", async (_req, res, next) => {
-  try {
-    const clientSecret = await generateAppleClientSecret();
-    res.json({ clientSecret, expiresInDays: 180 });
-  } catch (err) {
-    next(err);
-  }
-});
+// Note on Fix 1: /auth/apple/client-secret route has been permanently removed for security.
 
-// POST /auth/refresh
+// 3. POST /auth/refresh (Multi-tab safe with grace period)
 router.post("/refresh", async (req, res, next) => {
   try {
     const rawRefreshToken = req.cookies && req.cookies.refreshToken;
@@ -153,7 +162,10 @@ router.post("/refresh", async (req, res, next) => {
       req.ip
     );
 
-    res.cookie("refreshToken", newRefreshToken, getRefreshCookieOptions());
+    if (newRefreshToken) {
+      res.cookie("refreshToken", newRefreshToken, getRefreshCookieOptions());
+    }
+
     res.json({ accessToken });
   } catch (err) {
     res.clearCookie("refreshToken", getRefreshCookieOptions());
@@ -161,7 +173,7 @@ router.post("/refresh", async (req, res, next) => {
   }
 });
 
-// POST /auth/logout
+// 4. POST /auth/logout
 router.post("/logout", async (req, res, next) => {
   try {
     const rawRefreshToken = req.cookies && req.cookies.refreshToken;
@@ -173,7 +185,7 @@ router.post("/logout", async (req, res, next) => {
   }
 });
 
-// POST /auth/logout-all
+// 5. POST /auth/logout-all
 router.post("/logout-all", authMiddleware, async (req, res, next) => {
   try {
     await revokeAllUserSessions(req.user.id);

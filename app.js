@@ -16,6 +16,9 @@ var itemsRouter = require('./routes/items');
 
 var app = express();
 
+// Fix 4: Trust first proxy (Nginx, Render, Railway, AWS, etc.) so req.ip tracks real client IP
+app.set('trust proxy', 1);
+
 // Security Headers
 app.use(helmet({ contentSecurityPolicy: false }));
 
