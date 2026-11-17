@@ -17,6 +17,7 @@ const sendApplicationEmail = async (to, applicationData, jobDetails) => {
       <h2>Thank you for your application!</h2>
       <p>We've received your application for the position of <strong>${jobDetails.title}</strong> at ${jobDetails.company_name}.</p>
       
+      
       <h3>Application Details:</h3>
       <ul>
         <li><strong>Name:</strong> ${applicationData.full_name}</li>
