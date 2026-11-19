@@ -9,8 +9,10 @@ const {
   rotateRefreshToken,
   revokeSession,
   revokeAllUserSessions,
+  USER_REFRESH_COOKIE,
 } = require("./authHelper");
 const authMiddleware = require("./authMiddleware");
+const pool = require("./pool");
 
 const router = express.Router();
 
@@ -29,6 +31,7 @@ router.post("/google", async (req, res, next) => {
     if (!idToken) return res.status(400).json({ error: { code: "BAD_REQUEST", message: "idToken is required" } });
 
     const googleUser = await verifyGoogleIdToken(idToken);
+    const userType = req.body.userType === 'employer' ? 'employer' : 'candidate';
     const user = await findOrCreateUserWithIdentity({
       provider: "google",
       providerUserId: googleUser.sub,
@@ -39,6 +42,7 @@ router.post("/google", async (req, res, next) => {
       familyName: googleUser.familyName,
       picture: googleUser.picture,
       locale: googleUser.locale,
+      userType,
     });
 
     const { accessToken, refreshToken } = await createSession(
@@ -47,7 +51,7 @@ router.post("/google", async (req, res, next) => {
       req.ip
     );
 
-    res.cookie("refreshToken", refreshToken, getRefreshCookieOptions());
+    res.cookie(USER_REFRESH_COOKIE, refreshToken, getRefreshCookieOptions());
     res.json({ accessToken, user });
   } catch (err) {
     next(err);
@@ -135,7 +139,7 @@ router.post("/apple/callback", async (req, res, next) => {
       req.ip
     );
 
-    res.cookie("refreshToken", refreshToken, getRefreshCookieOptions());
+    res.cookie(USER_REFRESH_COOKIE, refreshToken, getRefreshCookieOptions());
 
     // Redirect smoothly to frontend auth success page
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
@@ -148,37 +152,55 @@ router.post("/apple/callback", async (req, res, next) => {
 
 // Note on Fix 1: /auth/apple/client-secret route has been permanently removed for security.
 
-// 3. POST /auth/refresh (Multi-tab safe with grace period)
+// 3. POST /auth/refresh (Multi-tab safe with grace period - strictly for Candidates & Employers)
 router.post("/refresh", async (req, res, next) => {
   try {
-    const rawRefreshToken = req.cookies && req.cookies.refreshToken;
+    const rawRefreshToken = req.cookies && (req.cookies[USER_REFRESH_COOKIE] || req.cookies.refreshToken);
     if (!rawRefreshToken) {
       return res.status(401).json({ error: { code: "REFRESH_TOKEN_REQUIRED", message: "Refresh cookie missing" } });
     }
 
-    const { accessToken, refreshToken: newRefreshToken } = await rotateRefreshToken(
+    const { accessToken, refreshToken: newRefreshToken, userId } = await rotateRefreshToken(
       rawRefreshToken,
       req.headers["user-agent"],
       req.ip
     );
 
     if (newRefreshToken) {
-      res.cookie("refreshToken", newRefreshToken, getRefreshCookieOptions());
+      res.cookie(USER_REFRESH_COOKIE, newRefreshToken, getRefreshCookieOptions());
     }
 
-    res.json({ accessToken });
+    // Strictly lookup candidate/employer in users table ONLY
+    const [users] = await pool.query(
+      "SELECT id, name, email, role, user_type, is_active FROM users WHERE id = ? AND is_active = TRUE",
+      [userId]
+    );
+
+    if (users.length === 0) {
+      return res.status(401).json({ error: { code: "USER_NOT_FOUND", message: "User account no longer exists" } });
+    }
+
+    const user = {
+      id: users[0].id,
+      name: users[0].name,
+      email: users[0].email,
+      role: users[0].role || 'user',
+      user_type: users[0].user_type || 'candidate',
+    };
+
+    res.json({ accessToken, user });
   } catch (err) {
-    res.clearCookie("refreshToken", getRefreshCookieOptions());
+    res.clearCookie(USER_REFRESH_COOKIE, getRefreshCookieOptions());
     next(err);
   }
 });
 
-// 4. POST /auth/logout
+// 4. POST /auth/logout (Candidate & Employer)
 router.post("/logout", async (req, res, next) => {
   try {
-    const rawRefreshToken = req.cookies && req.cookies.refreshToken;
+    const rawRefreshToken = req.cookies && (req.cookies[USER_REFRESH_COOKIE] || req.cookies.refreshToken);
     if (rawRefreshToken) await revokeSession(rawRefreshToken);
-    res.clearCookie("refreshToken", getRefreshCookieOptions());
+    res.clearCookie(USER_REFRESH_COOKIE, getRefreshCookieOptions());
     res.json({ success: true, message: "Logged out" });
   } catch (err) {
     next(err);
@@ -189,7 +211,7 @@ router.post("/logout", async (req, res, next) => {
 router.post("/logout-all", authMiddleware, async (req, res, next) => {
   try {
     await revokeAllUserSessions(req.user.id);
-    res.clearCookie("refreshToken", getRefreshCookieOptions());
+    res.clearCookie(USER_REFRESH_COOKIE, getRefreshCookieOptions());
     res.json({ success: true, message: "All sessions revoked" });
   } catch (err) {
     next(err);

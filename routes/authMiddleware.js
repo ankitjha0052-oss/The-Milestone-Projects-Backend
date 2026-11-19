@@ -22,18 +22,51 @@ async function authMiddleware(req, res, next) {
     });
   }
 
-  // Database lookup: Any DB error must be passed to next(err) so client gets 500, not 401 refresh loop
+  // Database lookup: Check users table first (for full profile data), fallback to superadmin
   try {
     const [users] = await pool.query(
       `SELECT id, name, given_name, family_name, email, email_verified, picture, locale, 
-              phone, phone_verified, birthday, gender, country, timezone, profile_completed, 
-              last_login_at, created_at 
+              phone, phone_verified, birthday, gender, country, timezone, location, headline, bio, profile_completed, 
+              role, free_jobs_used, is_active, last_login_at, created_at, user_type 
        FROM users WHERE id = ?`,
       [payload.userId]
     );
 
-    if (users.length === 0) {
-      return res.status(401).json({ error: { code: "USER_NOT_FOUND", message: "User account no longer exists" } });
+    if (users.length > 0) {
+      if (!users[0].is_active) {
+        return res.status(403).json({ error: { code: "ACCOUNT_DISABLED", message: "Account band hai" } });
+      }
+      req.user = users[0];
+      return next();
+    }
+
+    // Fallback: check superadmin table
+    const [superadmins] = await pool.query(
+      `SELECT id, name, email, login_id, role, is_active, created_at FROM superadmin WHERE id = ?`,
+      [payload.userId]
+    );
+
+    if (superadmins.length > 0) {
+      if (!superadmins[0].is_active) {
+        return res.status(403).json({ error: { code: "ACCOUNT_DISABLED", message: "Your administrator account has been deactivated. Please contact administration." } });
+      }
+      req.user = {
+        ...superadmins[0],
+        role: superadmins[0].role || 'superadmin',
+        user_type: 'superadmin',
+      };
+      return next();
+    }
+
+    return res.status(401).json({ error: { code: "USER_NOT_FOUND", message: "User account no longer exists" } });
+
+    if (!users[0].is_active) {
+      return res.status(403).json({
+        error: {
+          code: "ACCOUNT_DISABLED",
+          message: "Your account has been deactivated by administration. Please contact support at info@themilestoneprojects.co.in.",
+        },
+      });
     }
 
     req.user = users[0];

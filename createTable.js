@@ -72,15 +72,21 @@ const createJobsTableQuery = `
 CREATE TABLE IF NOT EXISTS jobs (
     id INT AUTO_INCREMENT PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
-    description TEXT NOT NULL,
     company_name VARCHAR(255) NOT NULL,
+    category VARCHAR(150),
     location VARCHAR(255) NOT NULL,
-    salary DECIMAL(10, 2),
-    posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    job_type VARCHAR(100) DEFAULT 'Full-time Permanent',
+    salary VARCHAR(100),
+    experience_required VARCHAR(100),
+    posted_at DATE,
     apply_by DATE,
-    status ENUM('active', 'closed') DEFAULT 'active',
-    job_type ENUM('full-time', 'part-time', 'contract', 'internship') DEFAULT 'full-time',
-    category VARCHAR(100)
+    status VARCHAR(50) DEFAULT 'Active',
+    vacancies_count INT DEFAULT 1,
+    description TEXT NOT NULL,
+    requirements TEXT,
+    applicants_count INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 `;
 
@@ -98,16 +104,39 @@ CREATE TABLE IF NOT EXISTS applications (
 );
 `;
 
+const createSuperAdminTableQuery = `
+CREATE TABLE IF NOT EXISTS superadmin (
+    id VARCHAR(36) PRIMARY KEY,
+    name VARCHAR(100) DEFAULT 'Super Admin',
+    email VARCHAR(191) NOT NULL UNIQUE,
+    login_id VARCHAR(100) NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(50) NOT NULL DEFAULT 'superadmin',
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+`;
+
 // Helper to add missing column safely if table already exists
 async function addColumnIfNotExists(table, column, definition) {
     try {
         await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
         console.log(`Added column ${column} to ${table}`);
     } catch (err) {
-        // Ignore error if column already exists (Error 1060)
         if (err.errno !== 1060) {
             console.warn(`Note on adding column ${column}:`, err.message);
         }
+    }
+}
+
+// Helper to modify column safely
+async function modifyColumnSafely(table, column, definition) {
+    try {
+        await pool.query(`ALTER TABLE ${table} MODIFY COLUMN ${column} ${definition}`);
+        console.log(`Modified column ${column} on ${table}`);
+    } catch (err) {
+        console.warn(`Note on modifying column ${column}:`, err.message);
     }
 }
 
@@ -123,6 +152,10 @@ async function addColumnIfNotExists(table, column, definition) {
         await addColumnIfNotExists("users", "gender", "VARCHAR(20)");
         await addColumnIfNotExists("users", "country", "VARCHAR(100)");
         await addColumnIfNotExists("users", "timezone", "VARCHAR(100)");
+        await addColumnIfNotExists("users", "location", "VARCHAR(255)");
+        await addColumnIfNotExists("users", "headline", "VARCHAR(255)");
+        await addColumnIfNotExists("users", "bio", "TEXT");
+        await modifyColumnSafely("users", "picture", "MEDIUMTEXT NULL");
         await addColumnIfNotExists("users", "profile_completed", "BOOLEAN DEFAULT FALSE");
         await addColumnIfNotExists("users", "last_login_at", "TIMESTAMP NULL");
         await addColumnIfNotExists("users", "login_count", "INT DEFAULT 0");
@@ -132,8 +165,6 @@ async function addColumnIfNotExists(table, column, definition) {
 
         await pool.query(createRefreshTokensTableQuery);
         console.log('✅ Table "refresh_tokens" checked/created!');
-
-        // Ensure revoked_at exists on refresh_tokens
         await addColumnIfNotExists("refresh_tokens", "revoked_at", "TIMESTAMP NULL");
 
         await pool.query(createItemsTableQuery);
@@ -142,10 +173,25 @@ async function addColumnIfNotExists(table, column, definition) {
         await pool.query(createJobsTableQuery);
         console.log('✅ Table "jobs" checked/created!');
 
+        // Upgrade columns on jobs to match frontend form fields
+        await modifyColumnSafely("jobs", "salary", "VARCHAR(100)");
+        await modifyColumnSafely("jobs", "job_type", "VARCHAR(100) DEFAULT 'Full-time Permanent'");
+        await modifyColumnSafely("jobs", "status", "VARCHAR(50) DEFAULT 'Active'");
+        await modifyColumnSafely("jobs", "posted_at", "DATE");
+        await addColumnIfNotExists("jobs", "experience_required", "VARCHAR(100)");
+        await addColumnIfNotExists("jobs", "vacancies_count", "INT DEFAULT 1");
+        await addColumnIfNotExists("jobs", "requirements", "TEXT");
+        await addColumnIfNotExists("jobs", "applicants_count", "INT DEFAULT 0");
+        await addColumnIfNotExists("jobs", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+        await addColumnIfNotExists("jobs", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
+
         await pool.query(createApplicationsTableQuery);
         console.log('✅ Table "applications" checked/created!');
+
+        await pool.query(createSuperAdminTableQuery);
+        console.log('✅ Table "superadmin" checked/created!');
     } catch (err) {
-        console.error('❌ Error creating tables:', err);
+        console.error('❌ Error creating/updating tables:', err);
     } finally {
         await pool.end();
         console.log('🔒 Database connection closed.');

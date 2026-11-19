@@ -60,8 +60,11 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
+const USER_REFRESH_COOKIE = "user_refreshToken";
+const ADMIN_REFRESH_COOKIE = "admin_refreshToken";
+
 // Fix 8: Cookie configuration with proper sameSite and domain handling
-function getRefreshCookieOptions() {
+function getRefreshCookieOptions(customPath = "/") {
   const isProduction = process.env.NODE_ENV === "production";
   const cookieDomain = process.env.COOKIE_DOMAIN || undefined;
 
@@ -72,7 +75,7 @@ function getRefreshCookieOptions() {
     sameSite: cookieDomain ? "lax" : (isProduction ? "none" : "lax"),
     domain: cookieDomain,
     maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    path: "/auth",
+    path: customPath,
   };
 }
 
@@ -153,7 +156,12 @@ function formatUserResponse(u) {
     gender: u.gender || null,
     country: u.country || null,
     timezone: u.timezone || null,
+    location: u.location || null,
+    headline: u.headline || null,
+    bio: u.bio || null,
     profileCompleted: Boolean(u.profile_completed),
+    role: u.role || 'user',
+    user_type: u.user_type || 'candidate',
     lastLoginAt: u.last_login_at || null,
     createdAt: u.created_at,
   };
@@ -161,7 +169,7 @@ function formatUserResponse(u) {
 
 // User Find / Create / Link Identity wrapped in MySQL TRANSACTION
 async function findOrCreateUserWithIdentity(profile) {
-  const { provider, providerUserId, email, emailVerified, name, givenName, familyName, picture, locale, isPrivateEmail } = profile;
+  const { provider, providerUserId, email, emailVerified, name, givenName, familyName, picture, locale, isPrivateEmail, userType } = profile;
 
   const connection = await pool.getConnection();
   try {
@@ -172,7 +180,7 @@ async function findOrCreateUserWithIdentity(profile) {
       `SELECT ai.*, u.id as u_id, u.name as u_name, u.given_name, u.family_name, u.email as u_email, 
               u.email_verified as u_email_verified, u.picture as u_picture, u.locale as u_locale, 
               u.phone as u_phone, u.phone_verified, u.birthday as u_birthday, u.gender, u.country, 
-              u.timezone, u.profile_completed, u.last_login_at, u.login_count, u.created_at
+              u.timezone, u.profile_completed, u.last_login_at, u.login_count, u.created_at, u.user_type, u.is_active as u_is_active
        FROM auth_identities ai 
        JOIN users u ON ai.user_id = u.id 
        WHERE ai.provider = ? AND ai.provider_user_id = ?
@@ -184,6 +192,15 @@ async function findOrCreateUserWithIdentity(profile) {
 
     if (identities.length > 0) {
       const existing = identities[0];
+
+      // Block login if user account is deactivated
+      if (existing.u_is_active === 0 || existing.u_is_active === false) {
+        const error = new Error("Your account has been deactivated by administration. Please contact support at info@themilestoneprojects.co.in.");
+        error.code = "ACCOUNT_DISABLED";
+        error.statusCode = 403;
+        throw error;
+      }
+
       finalUserId = existing.u_id;
 
       const updates = [];
@@ -194,6 +211,10 @@ async function findOrCreateUserWithIdentity(profile) {
       if (!existing.u_name && name) { updates.push("name = ?"); updateVals.push(name); }
       if (!existing.given_name && givenName) { updates.push("given_name = ?"); updateVals.push(givenName); }
       if (!existing.family_name && familyName) { updates.push("family_name = ?"); updateVals.push(familyName); }
+
+      if (userType === 'employer') {
+        updates.push("user_type = 'employer'");
+      }
 
       // Increment login count & track last login
       updates.push("login_count = login_count + 1");
@@ -206,10 +227,17 @@ async function findOrCreateUserWithIdentity(profile) {
       let existingUserId = null;
       if (email && emailVerified) {
         const [existingUsers] = await connection.query(
-          "SELECT id FROM users WHERE email = ? AND email_verified = TRUE FOR UPDATE",
+          "SELECT id, user_type, is_active FROM users WHERE email = ? AND email_verified = TRUE FOR UPDATE",
           [email]
         );
         if (existingUsers.length > 0) {
+          // Block login if user account is deactivated
+          if (existingUsers[0].is_active === 0 || existingUsers[0].is_active === false) {
+            const error = new Error("Your account has been deactivated by administration. Please contact support at info@themilestoneprojects.co.in.");
+            error.code = "ACCOUNT_DISABLED";
+            error.statusCode = 403;
+            throw error;
+          }
           existingUserId = existingUsers[0].id;
         }
       }
@@ -219,14 +247,19 @@ async function findOrCreateUserWithIdentity(profile) {
       if (!finalUserId) {
         // Create new user
         finalUserId = crypto.randomUUID();
+        const initialType = userType === 'employer' ? 'employer' : 'candidate';
         await connection.query(
-          `INSERT INTO users (id, name, given_name, family_name, email, email_verified, picture, locale, last_login_at, login_count) 
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1)`,
-          [finalUserId, name || null, givenName || null, familyName || null, email || null, Boolean(emailVerified), picture || null, locale || null]
+          `INSERT INTO users (id, name, given_name, family_name, email, email_verified, picture, locale, last_login_at, login_count, user_type) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1, ?)`,
+          [finalUserId, name || null, givenName || null, familyName || null, email || null, Boolean(emailVerified), picture || null, locale || null, initialType]
         );
       } else {
-        // Increment login count
-        await connection.query("UPDATE users SET login_count = login_count + 1, last_login_at = NOW() WHERE id = ?", [finalUserId]);
+        // Increment login count and update to employer if requested
+        if (userType === 'employer') {
+          await connection.query("UPDATE users SET login_count = login_count + 1, last_login_at = NOW(), user_type = 'employer' WHERE id = ?", [finalUserId]);
+        } else {
+          await connection.query("UPDATE users SET login_count = login_count + 1, last_login_at = NOW() WHERE id = ?", [finalUserId]);
+        }
       }
 
       // 3. Insert identity linked to user
@@ -381,6 +414,8 @@ async function cleanupOldRefreshTokens() {
 setInterval(cleanupOldRefreshTokens, 24 * 60 * 60 * 1000);
 
 module.exports = {
+  USER_REFRESH_COOKIE,
+  ADMIN_REFRESH_COOKIE,
   verifyAccessToken,
   getRefreshCookieOptions,
   verifyGoogleIdToken,

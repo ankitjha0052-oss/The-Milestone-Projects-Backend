@@ -4,6 +4,7 @@ const pool = require('./pool');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs'); 
+const crypto = require('crypto');
 const { sendApplicationEmail } = require('./mailer');
 
 
@@ -74,6 +75,22 @@ router.post('/apply', upload.single('resume'), async (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?)`,
       [job_id, full_name, email, phone, resumePath, cover_letter] 
     );
+
+    // Sync candidate applicant into users table so they appear in Admin candidates list
+    try {
+      const [existingUser] = await pool.query("SELECT id FROM users WHERE email = ?", [email]);
+      if (existingUser.length === 0) {
+        const candidateId = crypto.randomUUID();
+        await pool.query(
+          "INSERT INTO users (id, name, email, phone, user_type, is_active) VALUES (?, ?, ?, ?, 'candidate', TRUE)",
+          [candidateId, full_name, email, phone || null]
+        );
+      } else if (phone) {
+        await pool.query("UPDATE users SET phone = COALESCE(phone, ?) WHERE email = ?", [phone, email]);
+      }
+    } catch (syncErr) {
+      console.warn("Could not sync candidate to users table:", syncErr.message);
+    }
     
     try {
       await sendApplicationEmail(email, { full_name, email, phone }, jobDetails);

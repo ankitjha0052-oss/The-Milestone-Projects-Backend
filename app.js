@@ -9,10 +9,12 @@ require('dotenv').config();
 
 var indexRouter = require('./routes/index');
 var usersRouter = require('./routes/user');
-var jobRouter = require('./routes/job');
 var applicationRouter = require('./routes/applications');
 var authRouter = require('./routes/auth');
 var itemsRouter = require('./routes/items');
+const { jobRouter, adminRouter } = require('./routes/jobRoutes');
+const adminAuthRouter = require('./routes/adminAuthRoutes');
+const { paymentRouter, webhookHandler, startCronJobs } = require('./routes/paymentRoutes');
 
 var app = express();
 
@@ -45,8 +47,13 @@ app.set('views', path.join(__dirname, 'views'));
 app.set('view engine', 'ejs');
 
 app.use(logger('dev'));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+
+// IMPORTANT: Webhook express.json() se PEHLE aana chahiye taaki signature check ke liye raw buffer mile
+app.post("/payments/webhook", express.raw({ type: "application/json" }), webhookHandler);
+
+// Body Parsers (Webhook ke baad)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use("/resumes", express.static(path.join(__dirname, "public/resumes")));
@@ -54,31 +61,55 @@ app.use("/resumes", express.static(path.join(__dirname, "public/resumes")));
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'healthy' }));
 
-// ✅ Routes
+// ✅ Mounted Routes
 app.use('/', indexRouter);
-app.use('/auth', authRouter);       // Google, Apple, Refresh, Logout
-app.use('/user', usersRouter);     // Profile /user/me
-app.use('/me', usersRouter);       // Direct /me support
-app.use('/items', itemsRouter);    // Cursor pagination /items
-app.use('/job', jobRouter);
+app.use('/auth', authRouter);           // Google, Apple, Refresh, Logout
+app.use('/user', usersRouter);         // Profile /user/me
+app.use('/me', usersRouter);           // Direct /me support
+app.use('/items', itemsRouter);        // Cursor pagination /items
+app.use('/job', jobRouter);            // /job (add_job, fetch_all_jobs, etc.)
+app.use('/jobs', jobRouter);           // /jobs (RESTful standard)
+app.use('/admin', adminAuthRouter);   // /admin/login, /admin/stats, candidates, employers (PEHLE)
+app.use('/admin', adminRouter);       // /admin/jobs (BAAD ME)
+app.use('/payments', paymentRouter);   // /payments (plans, create-order, verify, subscription/me)
 app.use('/applications', applicationRouter);
+
+// Start recurring cron jobs (Hourly expiry of jobs & subscriptions)
+startCronJobs();
 
 // catch 404 and forward to error handler
 app.use(function (req, res, next) {
-  // If JSON requested or under /auth, /user, /items, return JSON 404
-  if (req.path.startsWith('/auth') || req.path.startsWith('/user') || req.path.startsWith('/items') || req.path.startsWith('/me')) {
+  if (
+    req.path.startsWith('/auth') || 
+    req.path.startsWith('/user') || 
+    req.path.startsWith('/items') || 
+    req.path.startsWith('/me') ||
+    req.path.startsWith('/job') ||
+    req.path.startsWith('/jobs') ||
+    req.path.startsWith('/admin') ||
+    req.path.startsWith('/payments')
+  ) {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Endpoint not found' } });
   }
   next(createError(404));
 });
 
-// error handler
+// Centralized error handler
 app.use(function (err, req, res, next) {
   const statusCode = err.status || err.statusCode || 500;
   const code = err.code || "INTERNAL_SERVER_ERROR";
 
-  // For API endpoints, return JSON
-  if (req.path.startsWith('/auth') || req.path.startsWith('/user') || req.path.startsWith('/items') || req.path.startsWith('/me') || req.xhr) {
+  if (
+    req.path.startsWith('/auth') || 
+    req.path.startsWith('/user') || 
+    req.path.startsWith('/items') || 
+    req.path.startsWith('/me') ||
+    req.path.startsWith('/job') ||
+    req.path.startsWith('/jobs') ||
+    req.path.startsWith('/admin') ||
+    req.path.startsWith('/payments') ||
+    req.xhr
+  ) {
     return res.status(statusCode).json({
       error: {
         code,
