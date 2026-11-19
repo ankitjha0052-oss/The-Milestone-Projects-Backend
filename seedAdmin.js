@@ -4,8 +4,12 @@ const crypto = require('crypto');
 
 async function seedSuperAdmin() {
     try {
-        const hash = bcrypt.hashSync('themilestoneprojects123@', 12);
-        const email = 'info@themilestoneprojects.co.in';
+        const seedPassword = process.env.ADMIN_SEED_PASSWORD;
+        if (!seedPassword) {
+            throw new Error("FATAL: ADMIN_SEED_PASSWORD environment variable is missing!");
+        }
+        const hash = bcrypt.hashSync(seedPassword, 12);
+        const email = process.env.ADMIN_SEED_EMAIL || 'info@themilestoneprojects.co.in';
 
         // 1. Clean superadmin table
         const [existing] = await pool.query(

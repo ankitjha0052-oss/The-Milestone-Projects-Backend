@@ -24,20 +24,29 @@ app.set('trust proxy', 1);
 // Security Headers
 app.use(helmet({ contentSecurityPolicy: false }));
 
-const allowedOrigins = [
-  'http://localhost:5173',
-  'https://themilestoneprojects.co.in',
-  'http://3.108.250.29:5173',
-];
+const envOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const allowedOrigins = Array.from(
+  new Set([
+    'http://localhost:5173',
+    'https://themilestoneprojects.co.in',
+    'http://3.108.250.29:5173',
+    ...envOrigins,
+  ])
+);
+
+const isLocal = (o) => /^http:\/\/localhost(:\d+)?$/.test(o);
 
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin) || origin.includes('localhost')) {
+    if (!origin || allowedOrigins.includes(origin) ||
+        (process.env.NODE_ENV !== 'production' && isLocal(origin))) {
       return callback(null, true);
-    } else {
-      return callback(new Error('Not allowed by CORS'));
     }
+    return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
 }));

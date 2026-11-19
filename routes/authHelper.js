@@ -106,7 +106,18 @@ async function verifyGoogleIdToken(idToken) {
 }
 
 // Apple Verification against JWKS
-function verifyAppleIdToken(idToken) {
+function verifyAppleIdToken(idToken, appleMeta) {
+  // Allow development mock tokens in non-production
+  if (process.env.NODE_ENV !== "production" && typeof idToken === "string" && idToken.startsWith("apple_id_token_")) {
+    const fallbackEmail = (appleMeta && appleMeta.email) ? String(appleMeta.email).trim() : `demo_${idToken.slice(0, 12)}@themilestoneprojects.co.in`;
+    return Promise.resolve({
+      sub: `mock-apple-${idToken}`,
+      email: fallbackEmail,
+      emailVerified: true,
+      isPrivateEmail: false,
+    });
+  }
+
   if (!APPLE_CLIENT_ID) {
     throw new Error("APPLE_CLIENT_ID environment variable is missing!");
   }
@@ -223,11 +234,11 @@ async function findOrCreateUserWithIdentity(profile) {
       updateVals.push(finalUserId);
       await connection.query(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`, updateVals);
     } else {
-      // 2. Link by verified email if user exists
+      // 2. Link by verified email if user exists (matches candidate-created users as well)
       let existingUserId = null;
       if (email && emailVerified) {
         const [existingUsers] = await connection.query(
-          "SELECT id, user_type, is_active FROM users WHERE email = ? AND email_verified = TRUE FOR UPDATE",
+          "SELECT id, user_type, is_active, email_verified FROM users WHERE email = ? FOR UPDATE",
           [email]
         );
         if (existingUsers.length > 0) {
@@ -239,6 +250,7 @@ async function findOrCreateUserWithIdentity(profile) {
             throw error;
           }
           existingUserId = existingUsers[0].id;
+          await connection.query("UPDATE users SET email_verified = TRUE WHERE id = ?", [existingUserId]);
         }
       }
 
@@ -254,12 +266,19 @@ async function findOrCreateUserWithIdentity(profile) {
           [finalUserId, name || null, givenName || null, familyName || null, email || null, Boolean(emailVerified), picture || null, locale || null, initialType]
         );
       } else {
-        // Increment login count and update to employer if requested
+        // Increment login count, update to employer if requested, and backfill profile info
+        const updates = ["login_count = login_count + 1", "last_login_at = NOW()"];
+        const updateVals = [];
         if (userType === 'employer') {
-          await connection.query("UPDATE users SET login_count = login_count + 1, last_login_at = NOW(), user_type = 'employer' WHERE id = ?", [finalUserId]);
-        } else {
-          await connection.query("UPDATE users SET login_count = login_count + 1, last_login_at = NOW() WHERE id = ?", [finalUserId]);
+          updates.push("user_type = 'employer'");
         }
+        if (name) { updates.push("name = COALESCE(name, ?)"); updateVals.push(name); }
+        if (givenName) { updates.push("given_name = COALESCE(given_name, ?)"); updateVals.push(givenName); }
+        if (familyName) { updates.push("family_name = COALESCE(family_name, ?)"); updateVals.push(familyName); }
+        if (picture) { updates.push("picture = COALESCE(picture, ?)"); updateVals.push(picture); }
+        if (locale) { updates.push("locale = COALESCE(locale, ?)"); updateVals.push(locale); }
+        updateVals.push(finalUserId);
+        await connection.query(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`, updateVals);
       }
 
       // 3. Insert identity linked to user
@@ -331,11 +350,11 @@ async function rotateRefreshToken(rawRefreshToken, deviceInfo, ip) {
       error.statusCode = 401;
       throw error;
     } else {
-      // Inside grace period: Return the replaced_by token if available or issue new token smoothly
+      // Inside grace period: Return new access token without setting revoked refresh token in cookie
       const newAccessToken = generateAccessToken(existingToken.user_id);
       return {
         accessToken: newAccessToken,
-        refreshToken: rawRefreshToken, // Keep session active
+        refreshToken: null,
         userId: existingToken.user_id,
       };
     }
@@ -367,7 +386,7 @@ async function rotateRefreshToken(rawRefreshToken, deviceInfo, ip) {
   if (updateResult.affectedRows === 0) {
     return {
       accessToken: newAccessToken,
-      refreshToken: rawRefreshToken,
+      refreshToken: null,
       userId: existingToken.user_id,
     };
   }

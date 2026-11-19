@@ -8,27 +8,42 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 const sendApplicationEmail = async (to, applicationData, jobDetails) => {
+  const safeTitle = escapeHtml(jobDetails.title);
+  const safeCompany = escapeHtml(jobDetails.company_name);
+  const safeName = escapeHtml(applicationData.full_name);
+  const safeEmail = escapeHtml(applicationData.email);
+  const safePhone = escapeHtml(applicationData.phone);
+
   const mailOptions = {
     from: process.env.EMAIL_USER,
     to: to,
-    subject: `Job Application Received - ${jobDetails.title}`,
+    subject: `Job Application Received - ${safeTitle}`,
     html: `
       <h2>Thank you for your application!</h2>
-      <p>We've received your application for the position of <strong>${jobDetails.title}</strong> at ${jobDetails.company_name}.</p>
-      
+      <p>We've received your application for the position of <strong>${safeTitle}</strong> at ${safeCompany}.</p>
       
       <h3>Application Details:</h3>
       <ul>
-        <li><strong>Name:</strong> ${applicationData.full_name}</li>
-        <li><strong>Email:</strong> ${applicationData.email}</li>
-        <li><strong>Phone:</strong> ${applicationData.phone}</li>
-        <li><strong>Position:</strong> ${jobDetails.title}</li>
-        <li><strong>Company:</strong> ${jobDetails.company_name}</li>
+        <li><strong>Name:</strong> ${safeName}</li>
+        <li><strong>Email:</strong> ${safeEmail}</li>
+        <li><strong>Phone:</strong> ${safePhone}</li>
+        <li><strong>Position:</strong> ${safeTitle}</li>
+        <li><strong>Company:</strong> ${safeCompany}</li>
       </ul>
       
       <p>We'll review your application and get back to you soon.</p>
-      <p>Best regards,<br>${jobDetails.company_name} HR Team</p>
+      <p>Best regards,<br>${safeCompany} HR Team</p>
     `
   };
 

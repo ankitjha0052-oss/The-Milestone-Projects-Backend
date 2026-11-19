@@ -5,9 +5,19 @@ const cron = require("node-cron");
 const pool = require("./pool");
 const authMiddleware = require("./authMiddleware");
 
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
+
+if (process.env.NODE_ENV === "production") {
+  if (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET || !RAZORPAY_WEBHOOK_SECRET) {
+    throw new Error("FATAL: Razorpay credentials (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET) missing in production!");
+  }
+}
+
 const rzp = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || "rzp_test_placeholder",
-  key_secret: process.env.RAZORPAY_KEY_SECRET || "placeholder_secret",
+  key_id: RAZORPAY_KEY_ID || "rzp_test_placeholder",
+  key_secret: RAZORPAY_KEY_SECRET || "rzp_secret_placeholder",
 });
 
 function httpError(status, code, message) {
@@ -154,8 +164,12 @@ paymentRouter.post("/verify", authMiddleware, async (req, res, next) => {
     );
     if (orders.length === 0) throw httpError(404, "ORDER_NOT_FOUND", "Order could not be found.");
 
+    if (!RAZORPAY_KEY_SECRET) {
+      throw httpError(500, "CONFIGURATION_ERROR", "Payment gateway secret not configured on server");
+    }
+
     const expected = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET || "placeholder_secret")
+      .createHmac("sha256", RAZORPAY_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest("hex");
 
@@ -208,8 +222,13 @@ paymentRouter.get("/subscription/me", authMiddleware, async (req, res, next) => 
 async function webhookHandler(req, res) {
   try {
     const signature = req.headers["x-razorpay-signature"];
+    if (!RAZORPAY_WEBHOOK_SECRET) {
+      console.error("FATAL: RAZORPAY_WEBHOOK_SECRET is not configured on server");
+      return res.status(500).send("Webhook secret unconfigured");
+    }
+
     const expected = crypto
-      .createHmac("sha256", process.env.RAZORPAY_WEBHOOK_SECRET || "placeholder_webhook_secret")
+      .createHmac("sha256", RAZORPAY_WEBHOOK_SECRET)
       .update(req.body) // raw Buffer
       .digest("hex");
 

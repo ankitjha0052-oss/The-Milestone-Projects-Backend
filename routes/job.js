@@ -69,6 +69,12 @@ const handleCreateJob = async (req, res) => {
                 message: 'Job title and Company name are required fields',
             });
         }
+        if (payload.title.length < 3 || payload.title.length > 200) {
+            return res.status(400).json({
+                status: false,
+                message: 'Job title must be between 3 and 200 characters in length.',
+            });
+        }
 
         const [result] = await pool.query(
             `INSERT INTO jobs 
@@ -186,6 +192,12 @@ router.post('/edit_job', upload.none(), async (req, res) => {
         if (!id) return res.status(400).json({ status: false, message: 'Job ID is required' });
 
         const payload = normalizeJobPayload(req.body);
+        if (payload.title && (payload.title.length < 3 || payload.title.length > 200)) {
+            return res.status(400).json({
+                status: false,
+                message: 'Job title must be between 3 and 200 characters in length.',
+            });
+        }
 
         const [result] = await pool.query(
             `UPDATE jobs SET 

@@ -20,8 +20,11 @@ async function createAndSeedSuperadmin() {
         `);
         console.log("✅ Table 'superadmin' created successfully!");
 
-        const email = 'info@themilestoneprojects.co.in';
-        const password = 'themilestoneprojects123@';
+        const email = process.env.ADMIN_SEED_EMAIL || 'info@themilestoneprojects.co.in';
+        const password = process.env.ADMIN_SEED_PASSWORD;
+        if (!password) {
+            throw new Error("FATAL: ADMIN_SEED_PASSWORD environment variable is missing!");
+        }
         const hash = bcrypt.hashSync(password, 12);
 
         // 1. Insert/Update in superadmin table

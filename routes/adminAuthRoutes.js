@@ -60,7 +60,7 @@ router.post("/login", loginLimiter, async (req, res, next) => {
 // POST /admin/refresh -> Dedicated refresh strictly for Super Admin
 router.post("/refresh", async (req, res, next) => {
   try {
-    const rawRefreshToken = req.cookies && (req.cookies[ADMIN_REFRESH_COOKIE] || req.cookies.refreshToken);
+    const rawRefreshToken = req.cookies && req.cookies[ADMIN_REFRESH_COOKIE];
     if (!rawRefreshToken) {
       return res.status(401).json({ error: { code: "REFRESH_TOKEN_REQUIRED", message: "Admin refresh cookie missing" } });
     }
@@ -103,7 +103,7 @@ router.post("/refresh", async (req, res, next) => {
 // POST /admin/logout -> Dedicated logout strictly for Super Admin
 router.post("/logout", async (req, res, next) => {
   try {
-    const rawRefreshToken = req.cookies && (req.cookies[ADMIN_REFRESH_COOKIE] || req.cookies.refreshToken);
+    const rawRefreshToken = req.cookies && req.cookies[ADMIN_REFRESH_COOKIE];
     if (rawRefreshToken) await revokeSession(rawRefreshToken);
     res.clearCookie(ADMIN_REFRESH_COOKIE, getRefreshCookieOptions());
     res.json({ success: true, message: "Super admin logged out" });

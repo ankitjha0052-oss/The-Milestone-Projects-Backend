@@ -52,8 +52,8 @@ function cleanSalary(b) {
 function validateJobBody(b) {
   const title = (b.title || "").trim();
   const description = (b.description || "").trim();
-  if (title.length < 3 || title.length > 200) throw httpError(400, "BAD_REQUEST", "Title 3-200 chars ka hona chahiye");
-  if (description.length < 10 || description.length > 10000) throw httpError(400, "BAD_REQUEST", "Description 10-10000 chars ki honi chahiye");
+  if (title.length < 3 || title.length > 200) throw httpError(400, "BAD_REQUEST", "Job title must be between 3 and 200 characters in length.");
+  if (description.length < 10 || description.length > 10000) throw httpError(400, "BAD_REQUEST", "Job description must be between 10 and 10,000 characters in length.");
 
   return {
     title,
@@ -97,10 +97,18 @@ const handleCreateJobPost = async (req, res, next) => {
     );
 
     let status, subscriptionId = null, expiresAtSql = null, mode;
+    const requestedStatus = String(req.body.status || "").trim().toUpperCase();
+    const isDraft = requestedStatus === "DRAFT";
 
-    if (req.user.role === "superadmin" || req.user.role === "admin") {
+    if (isDraft) {
+      // DRAFT: no quota deduction, saved as draft
+      status = "DRAFT";
+      mode = "draft";
+      expiresAtSql = null;
+      subscriptionId = null;
+    } else if (req.user.role === "superadmin" || req.user.role === "admin") {
       // Superadmin / Admin: direct live post without quota deductions
-      status = (req.body.status || "ACTIVE").toUpperCase() === "PENDING_APPROVAL" ? "PENDING_APPROVAL" : "ACTIVE";
+      status = requestedStatus === "PENDING_APPROVAL" ? "PENDING_APPROVAL" : "ACTIVE";
       expiresAtSql = data.applyBy || null;
       mode = "admin";
     } else if (subs.length > 0) {
@@ -154,9 +162,13 @@ const handleCreateJobPost = async (req, res, next) => {
     const newJobId = insertResult.insertId;
     await conn.commit();
 
+    let responseMsg = "Job approval ke liye bhej di gayi";
+    if (mode === "draft") responseMsg = "Job saved as draft";
+    else if (mode === "paid" || mode === "admin") responseMsg = "Job live ho gayi";
+
     res.status(201).json({
       status: true,
-      message: (mode === "paid" || mode === "admin") ? "Job live ho gayi" : "Job approval ke liye bhej di gayi",
+      message: responseMsg,
       job_id: newJobId,
       job: {
         id: newJobId,
@@ -238,11 +250,13 @@ jobRouter.get("/", async (req, res, next) => {
   }
 });
 
-// GET /jobs/all_job, /jobs/all_jobs, /jobs/fetch_all_jobs -> compatibility aliases
+// GET /jobs/all_job, /jobs/all_jobs, /jobs/fetch_all_jobs -> compatibility aliases (strictly ACTIVE and non-expired)
+const PUBLIC_JOB_COLUMNS = "id, title, company_name, category, location, job_type, salary, experience_required, vacancies_count, description, requirements, posted_at, apply_by, expires_at, created_at";
+
 const handleGetAllJobs = async (_req, res, next) => {
   try {
     const [rows] = await pool.query(
-      "SELECT * FROM jobs ORDER BY id DESC"
+      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE status = 'ACTIVE' AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY id DESC`
     );
     res.json({ status: true, data: rows });
   } catch (err) {
@@ -253,12 +267,37 @@ jobRouter.get("/fetch_all_jobs", handleGetAllJobs);
 jobRouter.get("/all_job", handleGetAllJobs);
 jobRouter.get("/all_jobs", handleGetAllJobs);
 
-// GET /jobs/:id -> single job details
+// GET /jobs/:id -> single job details (public if ACTIVE, or accessible to owner/admin)
 jobRouter.get("/:id", async (req, res, next) => {
   try {
     const [rows] = await pool.query("SELECT * FROM jobs WHERE id = ?", [req.params.id]);
     if (rows.length === 0) throw httpError(404, "NOT_FOUND", "Job posting not found.");
-    res.json({ status: true, data: rows[0] });
+    const job = rows[0];
+
+    const isLive = job.status === "ACTIVE" && (!job.expires_at || new Date(job.expires_at) > new Date());
+    if (isLive) {
+      return res.json({ status: true, data: job });
+    }
+
+    // If job is not currently active, allow if request is from the job's owner or an admin
+    const header = req.headers.authorization;
+    if (header && header.startsWith("Bearer ")) {
+      try {
+        const { verifyAccessToken } = require("./authHelper");
+        const payload = verifyAccessToken(header.substring(7).trim());
+        if (payload && payload.userId) {
+          if (job.user_id === payload.userId) {
+            return res.json({ status: true, data: job });
+          }
+          const [superadmins] = await pool.query("SELECT id FROM superadmin WHERE id = ?", [payload.userId]);
+          if (superadmins.length > 0) {
+            return res.json({ status: true, data: job });
+          }
+        }
+      } catch (_) {}
+    }
+
+    throw httpError(404, "NOT_FOUND", "Job posting not found.");
   } catch (err) {
     sendError(res, err, next);
   }

@@ -34,7 +34,7 @@ async function authMiddleware(req, res, next) {
 
     if (users.length > 0) {
       if (!users[0].is_active) {
-        return res.status(403).json({ error: { code: "ACCOUNT_DISABLED", message: "Account band hai" } });
+        return res.status(403).json({ error: { code: "ACCOUNT_DISABLED", message: "Your account has been deactivated. Please contact support." } });
       }
       req.user = users[0];
       return next();
@@ -59,18 +59,6 @@ async function authMiddleware(req, res, next) {
     }
 
     return res.status(401).json({ error: { code: "USER_NOT_FOUND", message: "User account no longer exists" } });
-
-    if (!users[0].is_active) {
-      return res.status(403).json({
-        error: {
-          code: "ACCOUNT_DISABLED",
-          message: "Your account has been deactivated by administration. Please contact support at info@themilestoneprojects.co.in.",
-        },
-      });
-    }
-
-    req.user = users[0];
-    next();
   } catch (dbError) {
     console.error("Database error in authMiddleware:", dbError.message);
     next(dbError); // Forward to 500 error handler

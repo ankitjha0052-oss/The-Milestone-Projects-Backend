@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     device_info VARCHAR(255),
     ip VARCHAR(100),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    INDEX idx_user_id (user_id)
 );
 `;
 

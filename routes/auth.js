@@ -16,21 +16,26 @@ const pool = require("./pool");
 
 const router = express.Router();
 
-const authRateLimiter = rateLimit({
+const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 50,
-  message: { error: { code: "RATE_LIMIT_EXCEEDED", message: "Too many attempts, try later." } },
+  message: { error: { code: "RATE_LIMIT_EXCEEDED", message: "Too many login attempts, try later." } },
 });
 
-router.use(authRateLimiter);
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 300,
+  message: { error: { code: "RATE_LIMIT_EXCEEDED", message: "Too many token refresh requests, try later." } },
+});
 
 // 1. POST /auth/google
-router.post("/google", async (req, res, next) => {
+router.post("/google", loginLimiter, async (req, res, next) => {
   try {
     const { idToken } = req.body;
     if (!idToken) return res.status(400).json({ error: { code: "BAD_REQUEST", message: "idToken is required" } });
 
     const googleUser = await verifyGoogleIdToken(idToken);
+
     const userType = req.body.userType === 'employer' ? 'employer' : 'candidate';
     const user = await findOrCreateUserWithIdentity({
       provider: "google",
@@ -59,12 +64,12 @@ router.post("/google", async (req, res, next) => {
 });
 
 // 2. POST /auth/apple (Fix 6: Always trust verified token email, NOT client req.body.user.email)
-router.post("/apple", async (req, res, next) => {
+router.post("/apple", loginLimiter, async (req, res, next) => {
   try {
     const { idToken, user: appleMeta } = req.body;
     if (!idToken) return res.status(400).json({ error: { code: "BAD_REQUEST", message: "idToken is required" } });
 
-    const appleUser = await verifyAppleIdToken(idToken);
+    const appleUser = await verifyAppleIdToken(idToken, appleMeta);
 
     // Name is sent by Apple only on first sign in
     let fullName = undefined;
@@ -153,7 +158,7 @@ router.post("/apple/callback", async (req, res, next) => {
 // Note on Fix 1: /auth/apple/client-secret route has been permanently removed for security.
 
 // 3. POST /auth/refresh (Multi-tab safe with grace period - strictly for Candidates & Employers)
-router.post("/refresh", async (req, res, next) => {
+router.post("/refresh", refreshLimiter, async (req, res, next) => {
   try {
     const rawRefreshToken = req.cookies && (req.cookies[USER_REFRESH_COOKIE] || req.cookies.refreshToken);
     if (!rawRefreshToken) {

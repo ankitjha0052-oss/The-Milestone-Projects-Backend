@@ -127,15 +127,46 @@ router.post('/apply', upload.single('resume'), async (req, res) => {
   }
 });
 
-router.get('/job/:job_id', async (req, res) => {
+const authMiddleware = require('./authMiddleware');
+
+// GET /applications/mine -> Recruiter / employer views applicants for their posted jobs
+router.get('/mine', authMiddleware, async (req, res, next) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT a.*, j.title AS job_title, j.company_name
+       FROM applications a 
+       JOIN jobs j ON a.job_id = j.id
+       WHERE j.user_id = ? 
+       ORDER BY a.applied_at DESC`,
+      [req.user.id]
+    );
+    res.json({ status: true, data: rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /applications/job/:job_id -> Protected: only job owner or superadmin can view applicants
+router.get('/job/:job_id', authMiddleware, async (req, res, next) => {
   try {
     const { job_id } = req.params;
     
+    const [jobRows] = await pool.query('SELECT user_id, title FROM jobs WHERE id = ?', [job_id]);
+    if (jobRows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Job not found' });
+    }
+    const isOwner = jobRows[0].user_id === req.user.id;
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'superadmin';
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'You do not have permission to view applicants for this job' } });
+    }
+
     const [applications] = await pool.query(
       `SELECT a.*, j.title as job_title 
        FROM applications a
        JOIN jobs j ON a.job_id = j.id
-       WHERE a.job_id = ?`,
+       WHERE a.job_id = ?
+       ORDER BY a.applied_at DESC`,
       [job_id]
     );
 
@@ -144,15 +175,12 @@ router.get('/job/:job_id', async (req, res) => {
       data: applications 
     });
   } catch (error) {
-    console.error('Error fetching applications:', error);
-    res.status(500).json({ 
-      status: false, 
-      message: 'Server error' 
-    });
+    next(error);
   }
 });
 
-router.put('/:id/status', async (req, res) => {
+// PUT /applications/:id/status -> Protected: only job owner or superadmin can update status
+router.put('/:id/status', authMiddleware, async (req, res, next) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
@@ -165,40 +193,58 @@ router.put('/:id/status', async (req, res) => {
       });
     }
 
-    const [result] = await pool.query(
-      `UPDATE applications SET status = ? WHERE id = ?`,
-      [status, id]
+    const [appRows] = await pool.query(
+      `SELECT a.id, j.user_id 
+       FROM applications a 
+       JOIN jobs j ON a.job_id = j.id 
+       WHERE a.id = ?`,
+      [id]
     );
 
-    if (result.affectedRows === 0) {
+    if (appRows.length === 0) {
       return res.status(404).json({ 
         status: false, 
         message: 'Application not found' 
       });
     }
 
+    const isOwner = appRows[0].user_id === req.user.id;
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'superadmin';
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ 
+        error: { code: 'FORBIDDEN', message: 'You do not have permission to update this application' } 
+      });
+    }
+
+    await pool.query(
+      `UPDATE applications SET status = ? WHERE id = ?`,
+      [status, id]
+    );
+
     res.status(200).json({ 
       status: true, 
       message: 'Status updated successfully' 
     });
   } catch (error) {
-    console.error('Error updating application status:', error);
-    res.status(500).json({ 
-      status: false, 
-      message: 'Server error' 
-    });
+    next(error);
   }
 });
 
-router.get('/user/:email', async (req, res) => {
+// GET /applications/user/:email -> Protected: only owner of the email or superadmin can view
+router.get('/user/:email', authMiddleware, async (req, res, next) => {
   try {
     const { email } = req.params;
+
+    if (req.user.email !== email && req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    }
     
     const [applications] = await pool.query(
       `SELECT a.*, j.title as job_title, j.company_name 
        FROM applications a
        JOIN jobs j ON a.job_id = j.id
-       WHERE a.email = ?`,
+       WHERE a.email = ?
+       ORDER BY a.applied_at DESC`,
       [email]
     );
 
@@ -207,11 +253,7 @@ router.get('/user/:email', async (req, res) => {
       data: applications 
     });
   } catch (error) {
-    console.error('Error fetching user applications:', error);
-    res.status(500).json({ 
-      status: false, 
-      message: 'Server error' 
-    });
+    next(error);
   }
 });
 
