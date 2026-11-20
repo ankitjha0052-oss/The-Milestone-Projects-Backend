@@ -57,12 +57,28 @@ router.post('/apply', upload.single('resume'), async (req, res) => {
       throw new Error('Failed to save resume file');
     }
 
-    const [jobRows] = await pool.query('SELECT * FROM jobs WHERE id = ?', [job_id]);
+    const [jobRows] = await pool.query(
+      "SELECT * FROM jobs WHERE id = ? AND status = 'ACTIVE' AND (expires_at IS NULL OR expires_at > NOW())",
+      [job_id]
+    );
     if (jobRows.length === 0) {
-      if (req.file.path) fs.unlinkSync(req.file.path);
+      if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
       return res.status(404).json({ 
         status: false, 
-        message: 'Job not found' 
+        message: 'This job is no longer accepting applications.' 
+      });
+    }
+
+    // duplicate rokna (insert se pehle)
+    const [dup] = await pool.query(
+      "SELECT id FROM applications WHERE job_id = ? AND email = ? LIMIT 1",
+      [job_id, email]
+    );
+    if (dup.length) {
+      if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      return res.status(409).json({ 
+        status: false, 
+        message: 'You have already applied for this job.' 
       });
     }
 
@@ -71,9 +87,9 @@ router.post('/apply', upload.single('resume'), async (req, res) => {
 
     const [result] = await pool.query(
       `INSERT INTO applications 
-      (job_id, full_name, email, phone, resume_path, cover_letter) 
-      VALUES (?, ?, ?, ?, ?, ?)`,
-      [job_id, full_name, email, phone, resumePath, cover_letter] 
+      (job_id, full_name, email, phone, resume_path, cover_letter, job_title, company_name) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [job_id, full_name, email, phone, resumePath, cover_letter, jobDetails.title, jobDetails.company_name] 
     );
 
     // Sync candidate applicant into users table so they appear in Admin candidates list
@@ -133,9 +149,9 @@ const authMiddleware = require('./authMiddleware');
 router.get('/mine', authMiddleware, async (req, res, next) => {
   try {
     const [rows] = await pool.query(
-      `SELECT a.*, j.title AS job_title, j.company_name
+      `SELECT a.*, COALESCE(j.title, a.job_title) AS job_title, COALESCE(j.company_name, a.company_name) AS company_name
        FROM applications a 
-       JOIN jobs j ON a.job_id = j.id
+       LEFT JOIN jobs j ON a.job_id = j.id
        WHERE j.user_id = ? 
        ORDER BY a.applied_at DESC`,
       [req.user.id]
@@ -162,9 +178,9 @@ router.get('/job/:job_id', authMiddleware, async (req, res, next) => {
     }
 
     const [applications] = await pool.query(
-      `SELECT a.*, j.title as job_title 
+      `SELECT a.*, COALESCE(j.title, a.job_title) as job_title, COALESCE(j.company_name, a.company_name) as company_name 
        FROM applications a
-       JOIN jobs j ON a.job_id = j.id
+       LEFT JOIN jobs j ON a.job_id = j.id
        WHERE a.job_id = ?
        ORDER BY a.applied_at DESC`,
       [job_id]
@@ -240,9 +256,9 @@ router.get('/user/:email', authMiddleware, async (req, res, next) => {
     }
     
     const [applications] = await pool.query(
-      `SELECT a.*, j.title as job_title, j.company_name 
+      `SELECT a.*, COALESCE(j.title, a.job_title) as job_title, COALESCE(j.company_name, a.company_name) as company_name 
        FROM applications a
-       JOIN jobs j ON a.job_id = j.id
+       LEFT JOIN jobs j ON a.job_id = j.id
        WHERE a.email = ?
        ORDER BY a.applied_at DESC`,
       [email]

@@ -14,6 +14,7 @@ var authRouter = require('./routes/auth');
 var itemsRouter = require('./routes/items');
 const { jobRouter, adminRouter } = require('./routes/jobRoutes');
 const adminAuthRouter = require('./routes/adminAuthRoutes');
+const candidateRouter = require('./routes/candidate');
 const { paymentRouter, webhookHandler, startCronJobs } = require('./routes/paymentRoutes');
 
 var app = express();
@@ -66,6 +67,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use("/resumes", express.static(path.join(__dirname, "public/resumes")));
+app.use("/resumes", express.static(path.join(__dirname, "private/resumes")));
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'healthy' }));
@@ -82,6 +84,7 @@ app.use('/admin', adminAuthRouter);   // /admin/login, /admin/stats, candidates,
 app.use('/admin', adminRouter);       // /admin/jobs (BAAD ME)
 app.use('/payments', paymentRouter);   // /payments (plans, create-order, verify, subscription/me)
 app.use('/applications', applicationRouter);
+app.use('/candidate', candidateRouter);      // /candidate (profile, experience, education, applications, resume)
 
 // Start recurring cron jobs (Hourly expiry of jobs & subscriptions)
 startCronJobs();
@@ -96,7 +99,9 @@ app.use(function (req, res, next) {
     req.path.startsWith('/job') ||
     req.path.startsWith('/jobs') ||
     req.path.startsWith('/admin') ||
-    req.path.startsWith('/payments')
+    req.path.startsWith('/payments') ||
+    req.path.startsWith('/candidate') ||
+    req.path.startsWith('/applications')
   ) {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Endpoint not found' } });
   }
@@ -117,6 +122,8 @@ app.use(function (err, req, res, next) {
     req.path.startsWith('/jobs') ||
     req.path.startsWith('/admin') ||
     req.path.startsWith('/payments') ||
+    req.path.startsWith('/candidate') ||
+    req.path.startsWith('/applications') ||
     req.xhr
   ) {
     return res.status(statusCode).json({

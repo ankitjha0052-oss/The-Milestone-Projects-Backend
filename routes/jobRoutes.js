@@ -49,6 +49,14 @@ function cleanSalary(b) {
   return sal || "Best in Industry";
 }
 
+const EXP_MAP = {
+  'Freshers Welcome': [0, 12],
+  '1-3 Years': [12, 36],
+  '3-5 Years': [36, 60],
+  '5-8 Years': [60, 96],
+  '8+ Years (Lead / Director)': [96, null],
+};
+
 function validateJobBody(b) {
   const title = (b.title || "").trim();
   const description = (b.description || "").trim();
@@ -127,18 +135,33 @@ const handleCreateJobPost = async (req, res, next) => {
       if (!user.in_free_window) {
         throw httpError(402, "FREE_PERIOD_ENDED", "Your 30-day free trial period has concluded. Please subscribe to a plan to continue posting vacancies.");
       }
-      if (user.free_jobs_used >= FREE_JOB_LIMIT) {
+
+      // Real-time count check guarantees no counter drift or legacy bypass can exceed 5 free jobs
+      const [[{ actualFreeJobs }]] = await conn.query(
+        "SELECT COUNT(*) AS actualFreeJobs FROM jobs WHERE user_id = ? AND (subscription_id IS NULL OR subscription_id = '')",
+        [req.user.id]
+      );
+      const effectiveUsed = Math.max(Number(user.free_jobs_used) || 0, Number(actualFreeJobs) || 0);
+
+      if (effectiveUsed >= FREE_JOB_LIMIT) {
+        if ((user.free_jobs_used || 0) < effectiveUsed) {
+          await conn.query("UPDATE users SET free_jobs_used = ? WHERE id = ?", [effectiveUsed, req.user.id]);
+        }
         throw httpError(402, "FREE_LIMIT_REACHED", "You have consumed all 5 free job postings. Please choose a plan to post additional vacancies.");
       }
+
       status = "PENDING_APPROVAL"; // admin approve karega
       mode = "free";
-      await conn.query("UPDATE users SET free_jobs_used = free_jobs_used + 1 WHERE id = ?", [req.user.id]);
+      const nextUsed = effectiveUsed + 1;
+      await conn.query("UPDATE users SET free_jobs_used = ? WHERE id = ?", [nextUsed, req.user.id]);
     }
+
+    const [expMin, expMax] = EXP_MAP[data.experienceRequired] || [null, null];
 
     const [insertResult] = await conn.query(
       `INSERT INTO jobs 
-       (user_id, title, company_name, category, location, job_type, salary, experience_required, posted_at, apply_by, status, vacancies_count, description, requirements, subscription_id, approved_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${status === "ACTIVE" ? "NOW()" : "NULL"}, ?)`,
+       (user_id, title, company_name, category, location, job_type, salary, experience_required, exp_min_months, exp_max_months, posted_at, apply_by, status, vacancies_count, description, requirements, subscription_id, approved_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${status === "ACTIVE" ? "NOW()" : "NULL"}, ?)`,
       [
         req.user.id,
         data.title,
@@ -148,6 +171,8 @@ const handleCreateJobPost = async (req, res, next) => {
         data.jobType,
         data.salary,
         data.experienceRequired,
+        expMin,
+        expMax,
         data.postedAt,
         data.applyBy,
         status,
@@ -209,7 +234,7 @@ jobRouter.get("/mine", authMiddleware, async (req, res, next) => {
         j.*,
         COALESCE((SELECT COUNT(*) FROM applications a WHERE a.job_id = j.id), j.applicants_count, 0) AS applicants_count
        FROM jobs j 
-       WHERE j.user_id = ? 
+       WHERE j.user_id = ? AND j.status != 'DELETED'
        ORDER BY j.created_at DESC`,
       [req.user.id]
     );
@@ -219,44 +244,93 @@ jobRouter.get("/mine", authMiddleware, async (req, res, next) => {
   }
 });
 
-// GET /jobs?limit=20&cursor=... -> public, sirf live jobs, cursor pagination me
+const PUBLIC_JOB_COLUMNS = "id, title, company_name, category, location, job_type, salary, experience_required, exp_min_months, exp_max_months, vacancies_count, description, requirements, DATE_FORMAT(posted_at,'%Y-%m-%d') AS posted_at, DATE_FORMAT(apply_by,'%Y-%m-%d') AS apply_by, expires_at, created_at";
+const LIVE = "status = 'ACTIVE' AND (expires_at IS NULL OR expires_at > NOW())";
+const list = (v) => String(v).split(',').map((s) => s.trim()).filter(Boolean).slice(0, 10);
+
+// Shared filter builder (website aur app dono use karenge)
+function buildJobWhere(q, { stretch = 0 } = {}) {
+  const w = [LIVE], p = [];
+  if (q.q) { const s = `%${String(q.q).trim().slice(0, 100)}%`; w.push("(title LIKE ? OR company_name LIKE ? OR description LIKE ?)"); p.push(s, s, s); }
+  if (q.category) { w.push("category IN (?)"); p.push(list(q.category)); }
+  if (q.job_type) { w.push("job_type IN (?)"); p.push(list(q.job_type)); }
+  if (q.location) { w.push("location LIKE ?"); p.push(`%${String(q.location).trim().slice(0, 100)}%`); }
+  const e = parseInt(q.exp, 10); // exp = months
+  if (Number.isInteger(e) && e >= 0) {
+    w.push("(exp_min_months IS NULL OR exp_min_months <= ?) AND (exp_max_months IS NULL OR exp_max_months >= ?)");
+    p.push(e + stretch, e);
+  }
+  return { where: w.join(" AND "), params: p };
+}
+
+// 1) WEBSITE: GET /jobs?q=&category=&job_type=&location=&exp=&page=1&limit=15
 jobRouter.get("/", async (req, res, next) => {
   try {
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
-    let sql =
-      "SELECT id, title, company_name, category, location, job_type, salary, experience_required, vacancies_count, description, requirements, expires_at, created_at FROM jobs WHERE status = 'ACTIVE' AND (expires_at IS NULL OR expires_at > NOW())";
-    const params = [];
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 15, 1), 50);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const { where, params } = buildJobWhere(req.query);
+    const [[{ total }]] = await pool.query(`SELECT COUNT(*) AS total FROM jobs WHERE ${where}`, params);
+    const [rows] = await pool.query(
+      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      [...params, limit, (page - 1) * limit]
+    );
+    res.json({ data: rows, total, page, limit, hasMore: page * limit < total });
+  } catch (err) { next(err); }
+});
 
-    if (req.query.cursor) {
-      const [createdAt, id] = Buffer.from(String(req.query.cursor), "base64").toString().split("|");
-      sql += " AND (created_at < ? OR (created_at = ? AND id < ?))";
-      params.push(createdAt, createdAt, id);
-    }
-    sql += " ORDER BY created_at DESC, id DESC LIMIT ?";
-    params.push(limit + 1);
+// 2) FILTER OPTIONS: GET /jobs/filters
+jobRouter.get("/filters", async (_req, res, next) => {
+  try {
+    const q = (col) => pool.query(`SELECT ${col} AS value, COUNT(*) AS count FROM jobs WHERE ${LIVE} AND ${col} IS NOT NULL GROUP BY ${col} ORDER BY count DESC LIMIT 30`);
+    const [[categories], [job_types], [locations]] = await Promise.all([q("category"), q("job_type"), q("location")]);
+    res.json({ categories, job_types, locations });
+  } catch (err) { next(err); }
+});
 
-    const [rows] = await pool.query(sql, params);
-    const hasMore = rows.length > limit;
-    const data = hasMore ? rows.slice(0, limit) : rows;
-    let nextCursor = null;
-    if (hasMore) {
-      const last = data[data.length - 1];
-      const ts = new Date(last.created_at).toISOString().slice(0, 19).replace("T", " ");
-      nextCursor = Buffer.from(`${ts}|${last.id}`).toString("base64");
-    }
-    res.json({ data, nextCursor, hasMore });
-  } catch (err) {
-    next(err);
-  }
+// 3) APP: GET /jobs/recommended?page=1&limit=15  (+ same filters optional)
+jobRouter.get("/recommended", authMiddleware, async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 15, 1), 50);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+
+    const [pr] = await pool.query("SELECT total_exp_months, current_city, skills FROM candidate_profiles WHERE user_id = ?", [req.user.id]);
+    const prof = pr[0] || {};
+    const exp = prof.total_exp_months; // null = profile me experience nahi bhara
+    let skills = prof.skills || [];
+    if (typeof skills === "string") { try { skills = JSON.parse(skills); } catch { skills = []; } }
+    skills = skills.map((s) => String(s).toLowerCase());
+    const city = String(prof.current_city || "").toLowerCase();
+
+    // experience: +12 month stretch upar, taaki 1 saal upar ki jobs bhi dikhein
+    const { where, params } = buildJobWhere({ ...req.query, exp: exp ?? undefined }, { stretch: 12 });
+    const [rows] = await pool.query(
+      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE ${where} ORDER BY created_at DESC LIMIT 200`, params
+    );
+    const [apps] = await pool.query("SELECT job_id FROM applications WHERE email = ?", [req.user.email]);
+    const applied = new Set(apps.map((a) => a.job_id));
+
+    const scored = rows.map((j) => {
+      const text = `${j.title} ${j.requirements || ""} ${j.description || ""}`.toLowerCase();
+      let score = Math.min(skills.filter((s) => text.includes(s)).length, 5) * 10; // skills match
+      if (city && String(j.location || "").toLowerCase().includes(city)) score += 20; // same city
+      const inRange = exp != null && (j.exp_min_months == null || j.exp_min_months <= exp) && (j.exp_max_months == null || j.exp_max_months >= exp);
+      if (inRange) score += 30; // exact experience band
+      return { ...j, match_score: score, applied: applied.has(j.id) };
+    }).sort((a, b) => b.match_score - a.match_score || new Date(b.created_at) - new Date(a.created_at));
+
+    res.json({
+      data: scored.slice((page - 1) * limit, page * limit),
+      total: scored.length, page, limit, hasMore: page * limit < scored.length,
+      personalized: exp != null, // false = app me "profile me experience add karo" nudge dikhao
+    });
+  } catch (err) { next(err); }
 });
 
 // GET /jobs/all_job, /jobs/all_jobs, /jobs/fetch_all_jobs -> compatibility aliases (strictly ACTIVE and non-expired)
-const PUBLIC_JOB_COLUMNS = "id, title, company_name, category, location, job_type, salary, experience_required, vacancies_count, description, requirements, posted_at, apply_by, expires_at, created_at";
-
 const handleGetAllJobs = async (_req, res, next) => {
   try {
     const [rows] = await pool.query(
-      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE status = 'ACTIVE' AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY id DESC`
+      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE ${LIVE} ORDER BY id DESC`
     );
     res.json({ status: true, data: rows });
   } catch (err) {
@@ -333,7 +407,7 @@ adminRouter.get("/jobs", async (req, res, next) => {
       whereConditions.push("j.status = ?");
       params.push(statusParam);
     } else if (!statusParam || statusParam === "ALL") {
-      // Show all jobs without status filter
+      whereConditions.push("j.status != 'DELETED'");
     } else {
       whereConditions.push("j.status = 'PENDING_APPROVAL'");
     }
@@ -358,6 +432,23 @@ adminRouter.get("/jobs", async (req, res, next) => {
     );
 
     res.json({ data: rows, total, page: Math.floor(offset / limit) + 1, limit });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /admin/jobs/:id -> Soft delete job so candidate applications are preserved
+adminRouter.delete("/jobs/:id", async (req, res, next) => {
+  try {
+    const [r] = await pool.query(
+      "UPDATE jobs SET status = 'DELETED', expires_at = NOW() WHERE id = ? AND status != 'DELETED'",
+      [req.params.id]
+    );
+    if (r.affectedRows === 0) {
+      return res.status(404).json({ error: { code: "NOT_FOUND", message: "Job not found." } });
+    }
+    await logAction(req.user.id, "DELETE", req.params.id);
+    res.json({ success: true, message: "Job removed. Candidate applications are preserved." });
   } catch (err) {
     next(err);
   }

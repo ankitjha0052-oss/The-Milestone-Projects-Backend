@@ -19,7 +19,7 @@ const avatarStorage = multer.diskStorage({
     cb(null, avatarUploadDir);
   },
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || ".jpg";
+    const ext = path.extname(file.originalname).toLowerCase();
     const safeName = `avatar-${req.user ? req.user.id : Date.now()}-${Date.now()}${ext}`;
     cb(null, safeName);
   },
@@ -29,10 +29,13 @@ const uploadAvatar = multer({
   storage: avatarStorage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
   fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith("image/")) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const okExt = ['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext);
+    const okMime = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.mimetype);
+    if (okExt && okMime) {
       cb(null, true);
     } else {
-      cb(new Error("Only image files (JPEG, PNG, WEBP, GIF) are allowed"));
+      cb(new Error('Only JPG, PNG, WEBP, GIF images allowed'));
     }
   },
 });
@@ -142,9 +145,6 @@ router.patch("/me", authMiddleware, async (req, res, next) => {
     if (timezone !== undefined) { updates.push("timezone = ?"); updateVals.push(timezone || null); }
     if (locale !== undefined) { updates.push("locale = ?"); updateVals.push(locale || null); }
 
-    // Mark profile_completed = TRUE
-    updates.push("profile_completed = TRUE");
-
     if (updates.length > 0) {
       updateVals.push(req.user.id);
       await pool.query(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`, updateVals);
@@ -177,7 +177,7 @@ router.post("/avatar", authMiddleware, uploadAvatar.single("file"), async (req, 
     }
 
     const avatarUrl = `/uploads/avatars/${req.file.filename}`;
-    await pool.query("UPDATE users SET picture = ?, profile_completed = TRUE WHERE id = ?", [avatarUrl, req.user.id]);
+    await pool.query("UPDATE users SET picture = ? WHERE id = ?", [avatarUrl, req.user.id]);
 
     const [updatedUser] = await pool.query("SELECT * FROM users WHERE id = ?", [req.user.id]);
 
