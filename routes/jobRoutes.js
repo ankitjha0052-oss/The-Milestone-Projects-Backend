@@ -226,6 +226,199 @@ jobRouter.post("/", authMiddleware, handleCreateJobPost);
 jobRouter.post("/add_job", authMiddleware, handleCreateJobPost);
 jobRouter.post("/create", authMiddleware, handleCreateJobPost);
 
+// Submit / Publish an existing draft job with identical quota and plan validation
+const handleSubmitDraftJob = async (req, res, next) => {
+  let conn;
+  try {
+    const jobId = req.params.id;
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    const [jobRows] = await conn.query(
+      "SELECT * FROM jobs WHERE id = ? AND user_id = ? FOR UPDATE",
+      [jobId, req.user.id]
+    );
+
+    if (jobRows.length === 0) {
+      throw httpError(404, "NOT_FOUND", "Job posting not found.");
+    }
+
+    const job = jobRows[0];
+    if (job.status !== "DRAFT") {
+      throw httpError(400, "NOT_DRAFT", `Only draft jobs can be submitted (current status: ${job.status}).`);
+    }
+
+    // User row lock: 2 tabs se ek saath submit karne pe limit cross na ho
+    const [users] = await conn.query(
+      "SELECT id, free_jobs_used, (created_at + INTERVAL ? DAY) > NOW() AS in_free_window FROM users WHERE id = ? FOR UPDATE",
+      [FREE_WINDOW_DAYS, req.user.id]
+    );
+    const user = users[0];
+
+    const [subs] = await conn.query(
+      "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'ACTIVE' AND starts_at <= NOW() AND ends_at > NOW() ORDER BY ends_at ASC LIMIT 1 FOR UPDATE",
+      [req.user.id]
+    );
+
+    let status, subscriptionId = null, expiresAtSql = null, mode;
+
+    if (req.user.role === "superadmin" || req.user.role === "admin") {
+      // Superadmin / Admin: direct live post without quota deductions
+      status = "ACTIVE";
+      expiresAtSql = job.apply_by || null;
+      mode = "admin";
+    } else if (subs.length > 0) {
+      const sub = subs[0];
+      if (sub.jobs_used >= sub.job_limit) {
+        throw httpError(402, "PLAN_LIMIT_REACHED", "You have reached the maximum job posting limit for your plan. Please upgrade to post additional vacancies.");
+      }
+      // PAID: directly live for duration of subscription
+      status = "ACTIVE";
+      subscriptionId = sub.id;
+      expiresAtSql = sub.ends_at;
+      mode = "paid";
+      await conn.query("UPDATE subscriptions SET jobs_used = jobs_used + 1 WHERE id = ?", [sub.id]);
+    } else {
+      // FREE: check 30 days & 5 limit
+      if (!user.in_free_window) {
+        throw httpError(402, "FREE_PERIOD_ENDED", "Your 30-day free trial period has concluded. Please subscribe to a plan to continue posting vacancies.");
+      }
+
+      // Real-time count check guarantees no counter drift or legacy bypass can exceed 5 free jobs
+      const [[{ actualFreeJobs }]] = await conn.query(
+        "SELECT COUNT(*) AS actualFreeJobs FROM jobs WHERE user_id = ? AND (subscription_id IS NULL OR subscription_id = '') AND status <> 'DRAFT'",
+        [req.user.id]
+      );
+      const effectiveUsed = Math.max(Number(user.free_jobs_used) || 0, Number(actualFreeJobs) || 0);
+
+      if (effectiveUsed >= FREE_JOB_LIMIT) {
+        if ((user.free_jobs_used || 0) < effectiveUsed) {
+          await conn.query("UPDATE users SET free_jobs_used = ? WHERE id = ?", [effectiveUsed, req.user.id]);
+        }
+        throw httpError(402, "FREE_LIMIT_REACHED", "You have consumed all 5 free job postings. Please choose a plan to post additional vacancies.");
+      }
+
+      status = "PENDING_APPROVAL"; // admin approve karega
+      mode = "free";
+      const nextUsed = effectiveUsed + 1;
+      await conn.query("UPDATE users SET free_jobs_used = ? WHERE id = ?", [nextUsed, req.user.id]);
+    }
+
+    // Optional field updates if body was passed
+    let updateFields = "";
+    const updateParams = [status, subscriptionId, expiresAtSql];
+
+    if (req.body && Object.keys(req.body).length > 0) {
+      try {
+        const data = validateJobBody({ ...job, ...req.body });
+        const [expMin, expMax] = EXP_MAP[data.experienceRequired] || [null, null];
+        updateFields = `, title = ?, company_name = ?, category = ?, location = ?, job_type = ?, salary = ?, experience_required = ?, exp_min_months = ?, exp_max_months = ?, apply_by = ?, vacancies_count = ?, description = ?, requirements = ?`;
+        updateParams.push(
+          data.title,
+          data.companyName,
+          data.category,
+          data.location,
+          data.jobType,
+          data.salary,
+          data.experienceRequired,
+          expMin,
+          expMax,
+          data.applyBy,
+          data.vacancies,
+          data.description,
+          data.requirements
+        );
+      } catch (_) {}
+    }
+
+    updateParams.push(jobId);
+
+    await conn.query(
+      `UPDATE jobs 
+       SET status = ?, 
+           subscription_id = ?, 
+           expires_at = ?, 
+           posted_at = NOW(), 
+           approved_at = ${status === "ACTIVE" ? "NOW()" : "NULL"}
+           ${updateFields}
+       WHERE id = ?`,
+      updateParams
+    );
+
+    await conn.commit();
+
+    // SSE Notifications
+    try {
+      const { emitToAdmin, emitToUser } = require("./events");
+      emitToAdmin({
+        type: "JOB_STATUS_UPDATED",
+        jobId: job.id,
+        status,
+        title: job.title,
+        company_name: job.company_name,
+        user_id: req.user.id
+      });
+      if (status === "ACTIVE") {
+        emitToUser(req.user.id, {
+          type: "JOB_STATUS_UPDATED",
+          jobId: job.id,
+          status: "ACTIVE",
+          title: job.title
+        });
+      }
+    } catch (_) {}
+
+    let responseMsg = "Job approval ke liye bhej di gayi";
+    if (mode === "paid" || mode === "admin") responseMsg = "Job live ho gayi";
+
+    res.json({
+      status: true,
+      message: responseMsg,
+      job_id: job.id,
+      job: {
+        id: job.id,
+        user_id: req.user.id,
+        title: job.title,
+        status,
+        expires_at: expiresAtSql
+      }
+    });
+  } catch (err) {
+    if (conn) await conn.rollback();
+    sendError(res, err, next);
+  } finally {
+    if (conn) conn.release();
+  }
+};
+
+// DELETE /jobs/:id -> Employer deletes their draft or closes their job
+const handleDeleteUserJob = async (req, res, next) => {
+  try {
+    const jobId = req.params.id;
+    const [rows] = await pool.query(
+      "SELECT id, status FROM jobs WHERE id = ? AND user_id = ?",
+      [jobId, req.user.id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: { code: "NOT_FOUND", message: "Job not found." } });
+    }
+    const job = rows[0];
+    if (job.status === "DRAFT") {
+      await pool.query("DELETE FROM jobs WHERE id = ?", [jobId]);
+      return res.json({ status: true, message: "Draft job deleted successfully." });
+    }
+    await pool.query("UPDATE jobs SET status = 'DELETED', expires_at = NOW() WHERE id = ?", [jobId]);
+    res.json({ status: true, message: "Job removed successfully." });
+  } catch (err) {
+    next(err);
+  }
+};
+
+jobRouter.post("/:id/submit", authMiddleware, handleSubmitDraftJob);
+jobRouter.patch("/:id/submit", authMiddleware, handleSubmitDraftJob);
+jobRouter.put("/:id/submit", authMiddleware, handleSubmitDraftJob);
+jobRouter.delete("/:id", authMiddleware, handleDeleteUserJob);
+
 // GET /jobs/mine -> user ki apni saari jobs with FULL details
 jobRouter.get("/mine", authMiddleware, async (req, res, next) => {
   try {
@@ -283,6 +476,7 @@ jobRouter.get("/filters", async (_req, res, next) => {
   try {
     const q = (col) => pool.query(`SELECT ${col} AS value, COUNT(*) AS count FROM jobs WHERE ${LIVE} AND ${col} IS NOT NULL GROUP BY ${col} ORDER BY count DESC LIMIT 30`);
     const [[categories], [job_types], [locations]] = await Promise.all([q("category"), q("job_type"), q("location")]);
+    res.setHeader('Cache-Control', 'public, max-age=300');
     res.json({ categories, job_types, locations });
   } catch (err) { next(err); }
 });

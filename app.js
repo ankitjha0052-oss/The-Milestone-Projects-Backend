@@ -16,6 +16,7 @@ const { jobRouter, adminRouter } = require('./routes/jobRoutes');
 const adminAuthRouter = require('./routes/adminAuthRoutes');
 const candidateRouter = require('./routes/candidate');
 const { paymentRouter, webhookHandler, startCronJobs } = require('./routes/paymentRoutes');
+const compression = require('compression');
 const { eventsRouter } = require('./routes/events');
 const filesRouter = require('./routes/files');
 
@@ -23,6 +24,18 @@ var app = express();
 
 // Fix 4: Trust first proxy (Nginx, Render, Railway, AWS, etc.) so req.ip tracks real client IP
 app.set('trust proxy', 1);
+
+// Compress HTTP responses with gzip/deflate for faster load on slow/2G/3G connections
+app.use(compression({
+  threshold: 1024,
+  filter: (req, res) => {
+    // Never compress Server-Sent Events (SSE) as buffering delays real-time streams
+    if (req.headers['accept'] === 'text/event-stream' || (req.originalUrl && req.originalUrl.startsWith('/events'))) {
+      return false;
+    }
+    return compression.filter(req, res);
+  }
+}));
 
 // Security Headers
 app.use(helmet({ contentSecurityPolicy: false }));
