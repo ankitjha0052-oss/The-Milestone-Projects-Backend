@@ -136,15 +136,15 @@ const handleCreateJobPost = async (req, res, next) => {
         throw httpError(402, "FREE_PERIOD_ENDED", "Your 30-day free trial period has concluded. Please subscribe to a plan to continue posting vacancies.");
       }
 
-      // Real-time count check guarantees no counter drift or legacy bypass can exceed 5 free jobs
+      // Real-time count check guarantees accurate tracking of free jobs
       const [[{ actualFreeJobs }]] = await conn.query(
         "SELECT COUNT(*) AS actualFreeJobs FROM jobs WHERE user_id = ? AND (subscription_id IS NULL OR subscription_id = '') AND status <> 'DRAFT'",
         [req.user.id]
       );
-      const effectiveUsed = Math.max(Number(user.free_jobs_used) || 0, Number(actualFreeJobs) || 0);
+      const effectiveUsed = Number(actualFreeJobs) || 0;
 
       if (effectiveUsed >= FREE_JOB_LIMIT) {
-        if ((user.free_jobs_used || 0) < effectiveUsed) {
+        if ((user.free_jobs_used || 0) !== effectiveUsed) {
           await conn.query("UPDATE users SET free_jobs_used = ? WHERE id = ?", [effectiveUsed, req.user.id]);
         }
         throw httpError(402, "FREE_LIMIT_REACHED", "You have consumed all 5 free job postings. Please choose a plan to post additional vacancies.");
@@ -284,15 +284,15 @@ const handleSubmitDraftJob = async (req, res, next) => {
         throw httpError(402, "FREE_PERIOD_ENDED", "Your 30-day free trial period has concluded. Please subscribe to a plan to continue posting vacancies.");
       }
 
-      // Real-time count check guarantees no counter drift or legacy bypass can exceed 5 free jobs
+      // Real-time count check guarantees accurate tracking of free jobs
       const [[{ actualFreeJobs }]] = await conn.query(
         "SELECT COUNT(*) AS actualFreeJobs FROM jobs WHERE user_id = ? AND (subscription_id IS NULL OR subscription_id = '') AND status <> 'DRAFT'",
         [req.user.id]
       );
-      const effectiveUsed = Math.max(Number(user.free_jobs_used) || 0, Number(actualFreeJobs) || 0);
+      const effectiveUsed = Number(actualFreeJobs) || 0;
 
       if (effectiveUsed >= FREE_JOB_LIMIT) {
-        if ((user.free_jobs_used || 0) < effectiveUsed) {
+        if ((user.free_jobs_used || 0) !== effectiveUsed) {
           await conn.query("UPDATE users SET free_jobs_used = ? WHERE id = ?", [effectiveUsed, req.user.id]);
         }
         throw httpError(402, "FREE_LIMIT_REACHED", "You have consumed all 5 free job postings. Please choose a plan to post additional vacancies.");

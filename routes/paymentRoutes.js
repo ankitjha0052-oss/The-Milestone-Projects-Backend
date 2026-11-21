@@ -204,10 +204,10 @@ paymentRouter.get("/subscription/me", authMiddleware, async (req, res, next) => 
     const userRow = u[0] || { free_jobs_used: 0, in_free_window: 1 };
 
     const [[{ actualFreeJobs }]] = await pool.query(
-      "SELECT COUNT(*) AS actualFreeJobs FROM jobs WHERE user_id = ? AND (subscription_id IS NULL OR subscription_id = '')",
+      "SELECT COUNT(*) AS actualFreeJobs FROM jobs WHERE user_id = ? AND (subscription_id IS NULL OR subscription_id = '') AND status <> 'DRAFT'",
       [req.user.id]
     );
-    const usedCount = Math.max(Number(userRow.free_jobs_used) || 0, Number(actualFreeJobs) || 0);
+    const usedCount = Number(actualFreeJobs) || 0;
 
     // Sync database counter if drifted
     if (userRow.free_jobs_used !== usedCount && req.user?.id) {
