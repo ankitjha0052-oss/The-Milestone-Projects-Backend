@@ -95,14 +95,21 @@ router.post('/apply', upload.single('resume'), async (req, res) => {
     // Sync candidate applicant into users table so they appear in Admin candidates list
     try {
       const [existingUser] = await pool.query("SELECT id FROM users WHERE email = ?", [email]);
+      let candidateId;
       if (existingUser.length === 0) {
-        const candidateId = crypto.randomUUID();
+        candidateId = crypto.randomUUID();
         await pool.query(
           "INSERT INTO users (id, name, email, phone, user_type, is_active) VALUES (?, ?, ?, ?, 'candidate', TRUE)",
           [candidateId, full_name, email, phone || null]
         );
-      } else if (phone) {
-        await pool.query("UPDATE users SET phone = COALESCE(phone, ?) WHERE email = ?", [phone, email]);
+      } else {
+        candidateId = existingUser[0].id;
+        if (phone) {
+          await pool.query("UPDATE users SET phone = COALESCE(phone, ?) WHERE email = ?", [phone, email]);
+        }
+      }
+      if (candidateId && result.insertId) {
+        await pool.query("UPDATE applications SET user_id = ? WHERE id = ?", [candidateId, result.insertId]);
       }
     } catch (syncErr) {
       console.warn("Could not sync candidate to users table:", syncErr.message);

@@ -233,7 +233,7 @@ router.get("/candidates/:id", guard, async (req, res, next) => {
       const [exp] = await pool.query(
         `SELECT id, company, designation, DATE_FORMAT(start_date, '%Y-%m-%d') as start_date,
                 DATE_FORMAT(end_date, '%Y-%m-%d') as end_date, is_current, description
-         FROM candidate_experiences WHERE user_id = ? ORDER BY start_date DESC`,
+         FROM candidate_experience WHERE user_id = ? ORDER BY start_date DESC`,
         [candidate.id]
       );
       experiences = exp;
@@ -242,7 +242,7 @@ router.get("/candidates/:id", guard, async (req, res, next) => {
     let educations = [];
     try {
       const [edu] = await pool.query(
-        `SELECT id, degree, institute, year_of_passing FROM candidate_educations WHERE user_id = ? ORDER BY year_of_passing DESC`,
+        `SELECT id, degree, institute, year_of_passing FROM candidate_education WHERE user_id = ? ORDER BY year_of_passing DESC`,
         [candidate.id]
       );
       educations = edu;
