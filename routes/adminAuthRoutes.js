@@ -162,10 +162,31 @@ function listUsers(type) {
       if (req.query.active === "true") where += " AND u.is_active = TRUE";
       if (req.query.active === "false") where += " AND u.is_active = FALSE";
 
-      const joins = type === "candidate" ? "LEFT JOIN candidate_profiles cp ON cp.user_id = u.id" : "";
+      const joins =
+        type === "candidate"
+          ? "LEFT JOIN candidate_profiles cp ON cp.user_id = u.id"
+          : `LEFT JOIN subscriptions s ON s.id = (
+               SELECT s2.id FROM subscriptions s2
+               WHERE s2.user_id = u.id AND s2.status = 'ACTIVE' AND s2.starts_at <= NOW() AND s2.ends_at > NOW()
+               ORDER BY s2.ends_at ASC LIMIT 1
+             )
+             LEFT JOIN plans p ON p.id = s.plan_id`;
       const extra =
         type === "employer"
-          ? ", (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id) AS jobs_count, (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id AND j.status = 'ACTIVE') AS active_jobs_count"
+          ? `, (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id) AS jobs_count, 
+             (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id AND j.status = 'ACTIVE') AS active_jobs_count,
+             p.name AS plan_name,
+             p.id AS plan_id,
+             s.job_limit,
+             s.jobs_used,
+             s.starts_at AS plan_starts_at,
+             s.ends_at AS plan_ends_at,
+             CASE
+               WHEN s.id IS NOT NULL THEN CONCAT(p.name, ' (', s.jobs_used, '/', s.job_limit, ' used)')
+               WHEN (u.created_at + INTERVAL 30 DAY) > NOW() AND (u.free_jobs_used < 5 OR u.free_jobs_used IS NULL) THEN CONCAT('Free Trial (', COALESCE(u.free_jobs_used, 0), '/5 used)')
+               WHEN (u.created_at + INTERVAL 30 DAY) > NOW() THEN 'Free quota exhausted'
+               ELSE 'Trial expired / No plan'
+             END AS plan_status`
           : `, cp.headline AS profile_headline, cp.summary, cp.total_exp_months, cp.current_city, cp.skills, cp.current_ctc, cp.expected_ctc, cp.notice_period_days,
              COALESCE(cp.resume_path, (SELECT a.resume_path FROM applications a WHERE a.email = u.email OR a.user_id = u.id ORDER BY a.id DESC LIMIT 1)) AS resume_path,
              (SELECT a.resume_path FROM applications a WHERE a.email = u.email OR a.user_id = u.id ORDER BY a.id DESC LIMIT 1) AS recent_resume,
@@ -271,7 +292,7 @@ async function logAction(adminId, action, note) {
     crypto.randomUUID(),
     adminId,
     action,
-    note,
+    note ? String(note).slice(0, 255) : null,
   ]);
 }
 
@@ -334,6 +355,122 @@ router.patch("/users/:id/activate", guard, async (req, res, next) => {
     res.json({ success: true, message: "User account activated successfully." });
   } catch (err) {
     next(err);
+  }
+});
+
+// GET /admin/plans -> Fetch all available plans for superadmin assignment
+router.get("/plans", guard, async (req, res, next) => {
+  try {
+    const [plans] = await pool.query(
+      "SELECT id, name, price_paise, job_limit, duration_days, is_active FROM plans WHERE is_active = TRUE ORDER BY id ASC"
+    );
+    res.json({ success: true, data: plans });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /admin/users/:id/assign-plan -> Super admin grants/changes plan for an employer or user
+router.post("/users/:id/assign-plan", guard, async (req, res, next) => {
+  const conn = await pool.getConnection();
+  try {
+    const { plan_id, duration_days, job_limit, note } = req.body;
+    if (!plan_id) {
+      return res.status(400).json({ error: { code: "BAD_REQUEST", message: "Plan ID is required." } });
+    }
+
+    const [users] = await conn.query("SELECT id, name, email, user_type, is_active FROM users WHERE id = ?", [req.params.id]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: { code: "NOT_FOUND", message: "User account could not be found." } });
+    }
+    const user = users[0];
+
+    if (user.user_type !== "employer") {
+      return res.status(400).json({ error: { code: "NOT_EMPLOYER", message: "Plans can be assigned to employer accounts only." } });
+    }
+
+    const [plans] = await conn.query("SELECT * FROM plans WHERE id = ?", [plan_id]);
+    if (plans.length === 0) {
+      return res.status(400).json({ error: { code: "INVALID_PLAN", message: "Selected plan does not exist." } });
+    }
+    const plan = plans[0];
+
+    const customDuration = parseInt(duration_days, 10);
+    const customJobLimit = parseInt(job_limit, 10);
+    const finalDurationDays = customDuration > 0 ? customDuration : plan.duration_days;
+    const finalJobLimit = customJobLimit > 0 ? customJobLimit : plan.job_limit;
+
+    await conn.beginTransaction();
+
+    const orderId = crypto.randomUUID();
+    const razorpayOrderId = `ADMIN_ASSIGNED_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+    const razorpayPaymentId = `ADMIN_${crypto.randomUUID()}`;
+    const adminId = req.user && req.user.id ? req.user.id : "superadmin";
+
+    // Insert order record for complete audit trail with unique payment ID
+    await conn.query(
+      "INSERT INTO orders (id, user_id, plan_id, razorpay_order_id, razorpay_payment_id, amount_paise, status, created_at, paid_at) VALUES (?, ?, ?, ?, ?, 0, 'PAID', NOW(), NOW())",
+      [orderId, user.id, plan.id, razorpayOrderId, razorpayPaymentId]
+    );
+
+    const { startSubscription } = require("./subscriptionHelper");
+    const sub = await startSubscription(conn, {
+      userId: user.id,
+      plan,
+      orderId,
+      jobLimit: finalJobLimit,
+      durationDays: finalDurationDays,
+    });
+
+    await conn.commit();
+
+    // Log superadmin action
+    await logAction(
+      adminId,
+      "ASSIGN_PLAN",
+      `Assigned ${plan.name} (${finalJobLimit} posts, ${finalDurationDays}d) to ${user.email}. ${note ? `Note: ${note}` : ''}`
+    );
+
+    // Emit live SSE events
+    try {
+      const { emitToUser, emitToAdmin } = require("./events");
+      emitToUser(user.id, {
+        type: "PLAN_ACTIVATED",
+        planName: plan.name,
+        endsAt: sub.endsAt,
+        jobLimit: finalJobLimit,
+      });
+      emitToAdmin({
+        type: "USER_STATUS_UPDATED",
+        userId: user.id,
+        plan_name: plan.name,
+      });
+    } catch (_) {}
+
+    const responseMsg = sub.startsNow
+      ? `Plan "${plan.name}" activated from today for ${user.name || user.email}.`
+      : `Plan "${plan.name}" queued for ${user.name || user.email}, starts on ${new Date(sub.startsAt).toLocaleDateString('en-IN')}.`;
+
+    res.json({
+      success: true,
+      message: responseMsg,
+      data: {
+        subscription_id: sub.subId,
+        user_id: user.id,
+        plan_name: plan.name,
+        job_limit: finalJobLimit,
+        duration_days: finalDurationDays,
+        starts_at: sub.startsAt,
+        ends_at: sub.endsAt,
+        starts_now: sub.startsNow,
+        upgrade_now: sub.upgradeNow,
+      },
+    });
+  } catch (err) {
+    await conn.rollback();
+    next(err);
+  } finally {
+    conn.release();
   }
 });
 

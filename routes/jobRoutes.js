@@ -100,11 +100,11 @@ const handleCreateJobPost = async (req, res, next) => {
     const user = users[0];
 
     const [subs] = await conn.query(
-      "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'ACTIVE' AND starts_at <= NOW() AND ends_at > NOW() ORDER BY ends_at ASC LIMIT 1 FOR UPDATE",
+      "SELECT s.*, p.name AS plan_name FROM subscriptions s JOIN plans p ON p.id = s.plan_id WHERE s.user_id = ? AND s.status = 'ACTIVE' AND s.starts_at <= NOW() AND s.ends_at > NOW() ORDER BY s.ends_at ASC LIMIT 1 FOR UPDATE",
       [req.user.id]
     );
 
-    let status, subscriptionId = null, expiresAtSql = null, mode;
+    let status, subscriptionId = null, expiresAtSql = null, mode, priority = 0;
     const requestedStatus = String(req.body.status || "").trim().toUpperCase();
     const isDraft = requestedStatus === "DRAFT";
 
@@ -129,6 +129,7 @@ const handleCreateJobPost = async (req, res, next) => {
       subscriptionId = sub.id;
       expiresAtSql = sub.ends_at;
       mode = "paid";
+      priority = { Growth: 1, Pro: 2 }[sub.plan_name] || 0;
       await conn.query("UPDATE subscriptions SET jobs_used = jobs_used + 1 WHERE id = ?", [sub.id]);
     } else {
       // FREE: check 30 days & 5 limit
@@ -160,8 +161,8 @@ const handleCreateJobPost = async (req, res, next) => {
 
     const [insertResult] = await conn.query(
       `INSERT INTO jobs 
-       (user_id, title, company_name, category, location, job_type, salary, experience_required, exp_min_months, exp_max_months, posted_at, apply_by, status, vacancies_count, description, requirements, subscription_id, approved_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${status === "ACTIVE" ? "NOW()" : "NULL"}, ?)`,
+       (user_id, title, company_name, category, location, job_type, salary, experience_required, exp_min_months, exp_max_months, posted_at, apply_by, status, vacancies_count, description, requirements, subscription_id, approved_at, expires_at, priority)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${status === "ACTIVE" ? "NOW()" : "NULL"}, ?, ?)`,
       [
         req.user.id,
         data.title,
@@ -181,6 +182,7 @@ const handleCreateJobPost = async (req, res, next) => {
         data.requirements,
         subscriptionId,
         expiresAtSql,
+        priority,
       ]
     );
 
@@ -248,6 +250,12 @@ const handleSubmitDraftJob = async (req, res, next) => {
       throw httpError(400, "NOT_DRAFT", `Only draft jobs can be submitted (current status: ${job.status}).`);
     }
 
+    // Validation quota se pehle: invalid body par turant 400 throw hoga aur quota deduct nahi hoga
+    let edited = null;
+    if (req.body && Object.keys(req.body).length > 0) {
+      edited = validateJobBody({ ...job, ...req.body });
+    }
+
     // User row lock: 2 tabs se ek saath submit karne pe limit cross na ho
     const [users] = await conn.query(
       "SELECT id, free_jobs_used, (created_at + INTERVAL ? DAY) > NOW() AS in_free_window FROM users WHERE id = ? FOR UPDATE",
@@ -256,11 +264,11 @@ const handleSubmitDraftJob = async (req, res, next) => {
     const user = users[0];
 
     const [subs] = await conn.query(
-      "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'ACTIVE' AND starts_at <= NOW() AND ends_at > NOW() ORDER BY ends_at ASC LIMIT 1 FOR UPDATE",
+      "SELECT s.*, p.name AS plan_name FROM subscriptions s JOIN plans p ON p.id = s.plan_id WHERE s.user_id = ? AND s.status = 'ACTIVE' AND s.starts_at <= NOW() AND s.ends_at > NOW() ORDER BY s.ends_at ASC LIMIT 1 FOR UPDATE",
       [req.user.id]
     );
 
-    let status, subscriptionId = null, expiresAtSql = null, mode;
+    let status, subscriptionId = null, expiresAtSql = null, mode, priority = 0;
 
     if (req.user.role === "superadmin" || req.user.role === "admin") {
       // Superadmin / Admin: direct live post without quota deductions
@@ -277,6 +285,7 @@ const handleSubmitDraftJob = async (req, res, next) => {
       subscriptionId = sub.id;
       expiresAtSql = sub.ends_at;
       mode = "paid";
+      priority = { Growth: 1, Pro: 2 }[sub.plan_name] || 0;
       await conn.query("UPDATE subscriptions SET jobs_used = jobs_used + 1 WHERE id = ?", [sub.id]);
     } else {
       // FREE: check 30 days & 5 limit
@@ -306,29 +315,27 @@ const handleSubmitDraftJob = async (req, res, next) => {
 
     // Optional field updates if body was passed
     let updateFields = "";
-    const updateParams = [status, subscriptionId, expiresAtSql];
+    const updateParams = [status, subscriptionId, expiresAtSql, priority];
 
-    if (req.body && Object.keys(req.body).length > 0) {
-      try {
-        const data = validateJobBody({ ...job, ...req.body });
-        const [expMin, expMax] = EXP_MAP[data.experienceRequired] || [null, null];
-        updateFields = `, title = ?, company_name = ?, category = ?, location = ?, job_type = ?, salary = ?, experience_required = ?, exp_min_months = ?, exp_max_months = ?, apply_by = ?, vacancies_count = ?, description = ?, requirements = ?`;
-        updateParams.push(
-          data.title,
-          data.companyName,
-          data.category,
-          data.location,
-          data.jobType,
-          data.salary,
-          data.experienceRequired,
-          expMin,
-          expMax,
-          data.applyBy,
-          data.vacancies,
-          data.description,
-          data.requirements
-        );
-      } catch (_) {}
+    if (edited) {
+      const data = edited;
+      const [expMin, expMax] = EXP_MAP[data.experienceRequired] || [null, null];
+      updateFields = `, title = ?, company_name = ?, category = ?, location = ?, job_type = ?, salary = ?, experience_required = ?, exp_min_months = ?, exp_max_months = ?, apply_by = ?, vacancies_count = ?, description = ?, requirements = ?`;
+      updateParams.push(
+        data.title,
+        data.companyName,
+        data.category,
+        data.location,
+        data.jobType,
+        data.salary,
+        data.experienceRequired,
+        expMin,
+        expMax,
+        data.applyBy,
+        data.vacancies,
+        data.description,
+        data.requirements
+      );
     }
 
     updateParams.push(jobId);
@@ -338,6 +345,7 @@ const handleSubmitDraftJob = async (req, res, next) => {
        SET status = ?, 
            subscription_id = ?, 
            expires_at = ?, 
+           priority = ?,
            posted_at = NOW(), 
            approved_at = ${status === "ACTIVE" ? "NOW()" : "NULL"}
            ${updateFields}
@@ -437,7 +445,7 @@ jobRouter.get("/mine", authMiddleware, async (req, res, next) => {
   }
 });
 
-const PUBLIC_JOB_COLUMNS = "id, title, company_name, category, location, job_type, salary, experience_required, exp_min_months, exp_max_months, vacancies_count, description, requirements, DATE_FORMAT(posted_at,'%Y-%m-%d') AS posted_at, DATE_FORMAT(apply_by,'%Y-%m-%d') AS apply_by, expires_at, created_at";
+const PUBLIC_JOB_COLUMNS = "id, title, company_name, category, location, job_type, salary, experience_required, exp_min_months, exp_max_months, vacancies_count, description, requirements, DATE_FORMAT(posted_at,'%Y-%m-%d') AS posted_at, DATE_FORMAT(apply_by,'%Y-%m-%d') AS apply_by, expires_at, created_at, priority";
 const LIVE = "status = 'ACTIVE' AND (expires_at IS NULL OR expires_at > NOW())";
 const list = (v) => String(v).split(',').map((s) => s.trim()).filter(Boolean).slice(0, 10);
 
@@ -464,7 +472,7 @@ jobRouter.get("/", async (req, res, next) => {
     const { where, params } = buildJobWhere(req.query);
     const [[{ total }]] = await pool.query(`SELECT COUNT(*) AS total FROM jobs WHERE ${where}`, params);
     const [rows] = await pool.query(
-      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE ${where} ORDER BY (priority > 0 AND created_at > NOW() - INTERVAL 7 DAY) DESC, priority DESC, created_at DESC, id DESC LIMIT ? OFFSET ?`,
       [...params, limit, (page - 1) * limit]
     );
     res.json({ data: rows, total, page, limit, hasMore: page * limit < total });
@@ -498,11 +506,12 @@ jobRouter.get("/recommended", authMiddleware, async (req, res, next) => {
     // experience: +12 month stretch upar, taaki 1 saal upar ki jobs bhi dikhein
     const { where, params } = buildJobWhere({ ...req.query, exp: exp ?? undefined }, { stretch: 12 });
     const [rows] = await pool.query(
-      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE ${where} ORDER BY created_at DESC LIMIT 200`, params
+      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE ${where} ORDER BY priority DESC, created_at DESC LIMIT 200`, params
     );
     const [apps] = await pool.query("SELECT job_id FROM applications WHERE email = ?", [req.user.email]);
     const applied = new Set(apps.map((a) => a.job_id));
 
+    const rank = (j) => j.match_score + (j.priority || 0) * 15;
     const scored = rows.map((j) => {
       const text = `${j.title} ${j.requirements || ""} ${j.description || ""}`.toLowerCase();
       let score = Math.min(skills.filter((s) => text.includes(s)).length, 5) * 10; // skills match
@@ -510,7 +519,7 @@ jobRouter.get("/recommended", authMiddleware, async (req, res, next) => {
       const inRange = exp != null && (j.exp_min_months == null || j.exp_min_months <= exp) && (j.exp_max_months == null || j.exp_max_months >= exp);
       if (inRange) score += 30; // exact experience band
       return { ...j, match_score: score, applied: applied.has(j.id) };
-    }).sort((a, b) => b.match_score - a.match_score || new Date(b.created_at) - new Date(a.created_at));
+    }).sort((a, b) => rank(b) - rank(a) || new Date(b.created_at) - new Date(a.created_at));
 
     res.json({
       data: scored.slice((page - 1) * limit, page * limit),
@@ -524,7 +533,7 @@ jobRouter.get("/recommended", authMiddleware, async (req, res, next) => {
 const handleGetAllJobs = async (_req, res, next) => {
   try {
     const [rows] = await pool.query(
-      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE ${LIVE} ORDER BY id DESC`
+      `SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE ${LIVE} ORDER BY (priority > 0 AND created_at > NOW() - INTERVAL 7 DAY) DESC, priority DESC, created_at DESC, id DESC`
     );
     res.json({ status: true, data: rows });
   } catch (err) {

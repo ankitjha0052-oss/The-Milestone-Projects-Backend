@@ -31,9 +31,9 @@ function getAppleKey(header, callback) {
   });
 }
 
-// 15-Minute Access Token
+// 30-Minute Access Token with generous buffer
 function generateAccessToken(userId) {
-  return jwt.sign({ userId }, ACCESS_TOKEN_SECRET, { expiresIn: "15m" });
+  return jwt.sign({ userId }, ACCESS_TOKEN_SECRET, { expiresIn: "30m" });
 }
 
 // Access Token Verifier
@@ -349,25 +349,35 @@ async function rotateRefreshToken(rawRefreshToken, deviceInfo, ip) {
 
   const existingToken = tokens[0];
 
-  // Token Theft Detection: Only alert if token was revoked MORE than 30 seconds ago
+  // Token Theft & Multi-Tab Grace Window: 5 minutes grace period for background tabs & network retries
   if (existingToken.revoked) {
     const revokedAtTime = existingToken.revoked_at ? new Date(existingToken.revoked_at).getTime() : 0;
     const nowTime = Date.now();
-    const gracePeriodMs = 30 * 1000; // 30 seconds grace period for parallel browser tabs
+    const gracePeriodMs = 5 * 60 * 1000; // 5 minutes grace period allows background/inactive tabs to recover safely
 
     if (nowTime - revokedAtTime > gracePeriodMs) {
-      console.warn(`[Security Alert] Token reuse detected for user ${existingToken.user_id} after grace period. Invalidation triggered.`);
-      await pool.query("UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ?", [existingToken.user_id]);
-      const error = new Error("Refresh token reuse detected. All sessions invalidated for security.");
-      error.code = "TOKEN_REUSE_DETECTED";
+      console.warn(`[Security Notice] Stale refresh token presented for user ${existingToken.user_id} past grace window. Session expired.`);
+      const error = new Error("Session has expired. Please log in again.");
+      error.code = "REFRESH_TOKEN_EXPIRED";
       error.statusCode = 401;
       throw error;
     } else {
-      // Inside grace period: Return new access token without setting revoked refresh token in cookie
+      // Inside grace period: Issue fresh tokens so the lagging tab/browser receives an active working cookie
       const newAccessToken = generateAccessToken(existingToken.user_id);
+      const newRefreshToken = generateRefreshToken();
+      const newTokenHash = hashToken(newRefreshToken);
+      const newExpiresAt = new Date();
+      newExpiresAt.setDate(newExpiresAt.getDate() + 30);
+
+      const newId = crypto.randomUUID();
+      await pool.query(
+        "INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, revoked, device_info, ip) VALUES (?, ?, ?, ?, FALSE, ?, ?)",
+        [newId, existingToken.user_id, newTokenHash, newExpiresAt, deviceInfo || existingToken.device_info, ip || existingToken.ip]
+      );
+
       return {
         accessToken: newAccessToken,
-        refreshToken: null,
+        refreshToken: newRefreshToken,
         userId: existingToken.user_id,
       };
     }
@@ -395,11 +405,19 @@ async function rotateRefreshToken(rawRefreshToken, deviceInfo, ip) {
     [newTokenHash, existingToken.id]
   );
 
-  // Race condition handled: another parallel tab just rotated it
+  // Race condition handled: another parallel tab rotated concurrently -> issue fresh valid token
   if (updateResult.affectedRows === 0) {
+    const concurrentRefreshToken = generateRefreshToken();
+    const concurrentTokenHash = hashToken(concurrentRefreshToken);
+    const concurrentId = crypto.randomUUID();
+    await pool.query(
+      "INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, revoked, device_info, ip) VALUES (?, ?, ?, ?, FALSE, ?, ?)",
+      [concurrentId, existingToken.user_id, concurrentTokenHash, newExpiresAt, deviceInfo || existingToken.device_info, ip || existingToken.ip]
+    );
+
     return {
       accessToken: newAccessToken,
-      refreshToken: null,
+      refreshToken: concurrentRefreshToken,
       userId: existingToken.user_id,
     };
   }

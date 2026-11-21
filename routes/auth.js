@@ -99,7 +99,7 @@ router.post("/apple", loginLimiter, async (req, res, next) => {
       req.ip
     );
 
-    res.cookie("refreshToken", refreshToken, getRefreshCookieOptions());
+    res.cookie(USER_REFRESH_COOKIE, refreshToken, getRefreshCookieOptions());
     res.json({ accessToken, user });
   } catch (err) {
     next(err);

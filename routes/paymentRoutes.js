@@ -55,45 +55,19 @@ async function activateOrder(razorpayOrderId, razorpayPaymentId) {
     const [plans] = await conn.query("SELECT * FROM plans WHERE id = ?", [order.plan_id]);
     const plan = plans[0];
 
-    // Pehle se active plan hai to naya uske end se shuru hoga (stack)
-    const [t] = await conn.query(
-      `SELECT NOW() AS now_ts,
-              (SELECT MAX(ends_at) FROM subscriptions WHERE user_id = ? AND status = 'ACTIVE' AND ends_at > NOW()) AS last_end`,
-      [order.user_id]
-    );
-    const startsNow = !t[0].last_end;
-    const startsAt = new Date(t[0].last_end || t[0].now_ts);
-    const endsAt = new Date(startsAt.getTime() + plan.duration_days * 24 * 60 * 60 * 1000);
-
-    const subId = crypto.randomUUID();
-    await conn.query(
-      "INSERT INTO subscriptions (id, user_id, plan_id, order_id, starts_at, ends_at, job_limit, jobs_used, status) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'ACTIVE')",
-      [subId, order.user_id, plan.id, order.id, startsAt, endsAt, plan.job_limit]
-    );
+    const { startSubscription } = require("./subscriptionHelper");
+    const sub = await startSubscription(conn, { userId: order.user_id, plan, orderId: order.id });
 
     await conn.query(
       "UPDATE orders SET status = 'PAID', razorpay_payment_id = ?, paid_at = NOW() WHERE id = ?",
       [razorpayPaymentId, order.id]
     );
 
-    // Plan abhi se chalu hai to user ki pending free jobs bhi live kar do
-    if (startsNow) {
-      const [pending] = await conn.query(
-        "SELECT id FROM jobs WHERE user_id = ? AND status = 'PENDING_APPROVAL' ORDER BY created_at ASC LIMIT ?",
-        [order.user_id, plan.job_limit]
-      );
-      if (pending.length > 0) {
-        const ids = pending.map((j) => j.id);
-        await conn.query(
-          "UPDATE jobs SET status = 'ACTIVE', subscription_id = ?, approved_at = NOW(), expires_at = ? WHERE id IN (?)",
-          [subId, endsAt, ids]
-        );
-        await conn.query("UPDATE subscriptions SET jobs_used = ? WHERE id = ?", [ids.length, subId]);
-      }
-    }
-
     await conn.commit();
-    return { alreadyActivated: false, subscriptionId: subId };
+    try {
+      require("./events").emitToUser(order.user_id, { type: "PLAN_ACTIVATED", planName: plan.name });
+    } catch (_) {}
+    return { alreadyActivated: false, subscriptionId: sub.subId };
   } catch (err) {
     await conn.rollback();
     throw err;
@@ -115,6 +89,12 @@ paymentRouter.get("/plans", async (_req, res, next) => {
     next(err);
   }
 });
+
+// GET /payments/key -> Public Razorpay Key ID
+paymentRouter.get("/key", (_req, res) => {
+  res.json({ keyId: RAZORPAY_KEY_ID || process.env.RAZORPAY_KEY_ID || "" });
+});
+
 
 // POST /payments/create-order  body: { planId }
 paymentRouter.post("/create-order", authMiddleware, async (req, res, next) => {
@@ -192,8 +172,8 @@ paymentRouter.get("/subscription/me", authMiddleware, async (req, res, next) => 
     const [subs] = await pool.query(
       `SELECT s.id, p.name AS plan_name, s.starts_at, s.ends_at, s.job_limit, s.jobs_used
        FROM subscriptions s JOIN plans p ON p.id = s.plan_id
-       WHERE s.user_id = ? AND s.status = 'ACTIVE' AND s.ends_at > NOW()
-       ORDER BY s.starts_at ASC LIMIT 1`,
+       WHERE s.user_id = ? AND s.status = 'ACTIVE' AND s.starts_at <= NOW() AND s.ends_at > NOW()
+       ORDER BY s.ends_at ASC LIMIT 1`,
       [req.user.id]
     );
     const [u] = await pool.query(

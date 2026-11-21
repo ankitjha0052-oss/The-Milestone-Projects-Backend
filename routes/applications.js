@@ -123,6 +123,22 @@ router.post('/apply', applyLimiter, upload.single('resume'), async (req, res) =>
       }
       if (candidateId && result.insertId) {
         await pool.query("UPDATE applications SET user_id = ? WHERE id = ?", [candidateId, result.insertId]);
+
+        // Copy resume to candidate_profiles if candidate doesn't have a profile resume yet
+        try {
+          const [cp] = await pool.query("SELECT resume_path FROM candidate_profiles WHERE user_id = ?", [candidateId]);
+          if (!cp.length || !cp[0].resume_path) {
+            const copyName = `resume-${crypto.randomBytes(16).toString('hex')}-${Date.now()}${path.extname(resumePath)}`;
+            fs.copyFileSync(req.file.path, path.join(uploadDir, copyName));
+            await pool.query(
+              `INSERT INTO candidate_profiles (user_id, resume_path) VALUES (?, ?)
+               ON DUPLICATE KEY UPDATE resume_path = COALESCE(resume_path, VALUES(resume_path))`,
+              [candidateId, copyName]
+            );
+          }
+        } catch (cpErr) {
+          console.warn("Could not copy resume to candidate_profiles:", cpErr.message);
+        }
       }
     } catch (syncErr) {
       console.warn("Could not sync candidate to users table:", syncErr.message);
