@@ -8,10 +8,18 @@ const crypto = require('crypto');
 const { sendApplicationEmail } = require('./mailer');
 
 
-const uploadDir = path.join(__dirname, '../public/resumes');
+const rateLimit = require('express-rate-limit');
+
+const uploadDir = path.join(__dirname, '../private/resumes');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
+
+const applyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  message: { status: false, message: 'Too many applications. Try again later.' }
+});
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -42,7 +50,7 @@ const upload = multer({
   }
 });
 
-router.post('/apply', upload.single('resume'), async (req, res) => {
+router.post('/apply', applyLimiter, upload.single('resume'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ 
@@ -52,6 +60,11 @@ router.post('/apply', upload.single('resume'), async (req, res) => {
     }
 
     const { job_id, full_name, email, phone, cover_letter } = req.body;
+    const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
+    if (!job_id || !String(full_name || '').trim() || !emailOk || !String(phone || '').trim()) {
+      if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      return res.status(400).json({ status: false, message: 'Name, valid email and phone are required.' });
+    }
 
     if (!fs.existsSync(req.file.path)) {
       throw new Error('Failed to save resume file');
@@ -93,9 +106,9 @@ router.post('/apply', upload.single('resume'), async (req, res) => {
     );
 
     // Sync candidate applicant into users table so they appear in Admin candidates list
+    let candidateId = null;
     try {
       const [existingUser] = await pool.query("SELECT id FROM users WHERE email = ?", [email]);
-      let candidateId;
       if (existingUser.length === 0) {
         candidateId = crypto.randomUUID();
         await pool.query(
@@ -120,6 +133,36 @@ router.post('/apply', upload.single('resume'), async (req, res) => {
     } catch (emailError) {
       console.error('Error sending email:', emailError);
     }
+
+    // Real-Time SSE Dispatch: notify job owner employer and Super Admin
+    try {
+      const { emitToUser, emitToAdmin } = require("./events");
+      if (jobDetails.user_id) {
+        emitToUser(jobDetails.user_id, {
+          type: "NEW_APPLICATION",
+          jobId: job_id,
+          jobTitle: jobDetails.title,
+          application: {
+            id: result.insertId,
+            full_name,
+            email,
+            phone,
+            job_title: jobDetails.title,
+            applied_at: new Date().toISOString()
+          }
+        });
+      }
+      emitToAdmin({
+        type: "NEW_APPLICATION",
+        candidate: {
+          id: candidateId,
+          name: full_name,
+          email,
+          phone,
+          job_title: jobDetails.title
+        }
+      });
+    } catch (_) {}
 
     res.status(201).json({ 
       status: true, 
@@ -219,7 +262,7 @@ router.put('/:id/status', authMiddleware, async (req, res, next) => {
     const [appRows] = await pool.query(
       `SELECT a.id, j.user_id 
        FROM applications a 
-       JOIN jobs j ON a.job_id = j.id 
+       LEFT JOIN jobs j ON a.job_id = j.id 
        WHERE a.id = ?`,
       [id]
     );

@@ -16,6 +16,8 @@ const { jobRouter, adminRouter } = require('./routes/jobRoutes');
 const adminAuthRouter = require('./routes/adminAuthRoutes');
 const candidateRouter = require('./routes/candidate');
 const { paymentRouter, webhookHandler, startCronJobs } = require('./routes/paymentRoutes');
+const { eventsRouter } = require('./routes/events');
+const filesRouter = require('./routes/files');
 
 var app = express();
 
@@ -56,6 +58,7 @@ app.use(cors({
 app.set('views', path.join(__dirname, 'views'));
 app.set('view engine', 'ejs');
 
+logger.token('url', (req) => req.originalUrl.split('?')[0]);
 app.use(logger('dev'));
 
 // IMPORTANT: Webhook express.json() se PEHLE aana chahiye taaki signature check ke liye raw buffer mile
@@ -66,8 +69,6 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
-app.use("/resumes", express.static(path.join(__dirname, "public/resumes")));
-app.use("/resumes", express.static(path.join(__dirname, "private/resumes")));
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'healthy' }));
@@ -85,6 +86,8 @@ app.use('/admin', adminRouter);       // /admin/jobs (BAAD ME)
 app.use('/payments', paymentRouter);   // /payments (plans, create-order, verify, subscription/me)
 app.use('/applications', applicationRouter);
 app.use('/candidate', candidateRouter);      // /candidate (profile, experience, education, applications, resume)
+app.use('/events', eventsRouter);            // /events/stream (Server-Sent Events)
+app.use('/files', filesRouter);              // /files/resume/:filename (Protected resume access)
 
 // Start recurring cron jobs (Hourly expiry of jobs & subscriptions)
 startCronJobs();
@@ -101,6 +104,8 @@ app.use(function (req, res, next) {
     req.path.startsWith('/admin') ||
     req.path.startsWith('/payments') ||
     req.path.startsWith('/candidate') ||
+    req.path.startsWith('/events') ||
+    req.path.startsWith('/files') ||
     req.path.startsWith('/applications')
   ) {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Endpoint not found' } });
@@ -123,6 +128,8 @@ app.use(function (err, req, res, next) {
     req.path.startsWith('/admin') ||
     req.path.startsWith('/payments') ||
     req.path.startsWith('/candidate') ||
+    req.path.startsWith('/events') ||
+    req.path.startsWith('/files') ||
     req.path.startsWith('/applications') ||
     req.xhr
   ) {

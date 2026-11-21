@@ -138,7 +138,7 @@ const handleCreateJobPost = async (req, res, next) => {
 
       // Real-time count check guarantees no counter drift or legacy bypass can exceed 5 free jobs
       const [[{ actualFreeJobs }]] = await conn.query(
-        "SELECT COUNT(*) AS actualFreeJobs FROM jobs WHERE user_id = ? AND (subscription_id IS NULL OR subscription_id = '')",
+        "SELECT COUNT(*) AS actualFreeJobs FROM jobs WHERE user_id = ? AND (subscription_id IS NULL OR subscription_id = '') AND status <> 'DRAFT'",
         [req.user.id]
       );
       const effectiveUsed = Math.max(Number(user.free_jobs_used) || 0, Number(actualFreeJobs) || 0);
@@ -350,7 +350,8 @@ jobRouter.get("/:id", async (req, res, next) => {
 
     const isLive = job.status === "ACTIVE" && (!job.expires_at || new Date(job.expires_at) > new Date());
     if (isLive) {
-      return res.json({ status: true, data: job });
+      const [pub] = await pool.query(`SELECT ${PUBLIC_JOB_COLUMNS} FROM jobs WHERE id = ?`, [job.id]);
+      return res.json({ status: true, data: pub[0] });
     }
 
     // If job is not currently active, allow if request is from the job's owner or an admin
@@ -467,6 +468,14 @@ adminRouter.patch("/jobs/:id/approve", async (req, res, next) => {
       return res.status(409).json({ error: { code: "NOT_PENDING", message: "The job is not in a pending review state." } });
     }
     await logAction(req.user.id, "APPROVE", req.params.id);
+
+    try {
+      const [j] = await pool.query("SELECT user_id, title FROM jobs WHERE id = ?", [req.params.id]);
+      const { emitToUser, emitToAdmin } = require("./events");
+      if (j.length) emitToUser(j[0].user_id, { type: "JOB_STATUS_UPDATED", jobId: req.params.id, status: "ACTIVE", title: j[0].title });
+      emitToAdmin({ type: "JOB_STATUS_UPDATED", jobId: req.params.id, status: "ACTIVE" });
+    } catch (_) {}
+
     res.json({ success: true, message: "Job approved and published successfully." });
   } catch (err) {
     next(err);
@@ -485,6 +494,14 @@ adminRouter.patch("/jobs/:id/reject", async (req, res, next) => {
       return res.status(409).json({ error: { code: "NOT_PENDING", message: "The job is not in a pending review state." } });
     }
     await logAction(req.user.id, "REJECT", req.params.id, reason);
+
+    try {
+      const [j] = await pool.query("SELECT user_id, title FROM jobs WHERE id = ?", [req.params.id]);
+      const { emitToUser, emitToAdmin } = require("./events");
+      if (j.length) emitToUser(j[0].user_id, { type: "JOB_STATUS_UPDATED", jobId: req.params.id, status: "REJECTED", title: j[0].title, reason });
+      emitToAdmin({ type: "JOB_STATUS_UPDATED", jobId: req.params.id, status: "REJECTED" });
+    } catch (_) {}
+
     res.json({ success: true, message: "The job posting has been rejected." });
   } catch (err) {
     next(err);
@@ -503,6 +520,14 @@ adminRouter.patch("/jobs/:id/activate", async (req, res, next) => {
     );
     if (r.affectedRows === 0) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Job posting not found." } });
     await logAction(req.user.id, "ACTIVATE", req.params.id, `${days} days`);
+
+    try {
+      const [j] = await pool.query("SELECT user_id, title FROM jobs WHERE id = ?", [req.params.id]);
+      const { emitToUser, emitToAdmin } = require("./events");
+      if (j.length) emitToUser(j[0].user_id, { type: "JOB_STATUS_UPDATED", jobId: req.params.id, status: "ACTIVE", title: j[0].title });
+      emitToAdmin({ type: "JOB_STATUS_UPDATED", jobId: req.params.id, status: "ACTIVE" });
+    } catch (_) {}
+
     res.json({ success: true, message: `The job posting has been activated for ${days} days.` });
   } catch (err) {
     next(err);
@@ -520,6 +545,14 @@ adminRouter.patch("/jobs/:id/deactivate", async (req, res, next) => {
       return res.status(409).json({ error: { code: "ALREADY_CLOSED", message: "The job posting is already closed or does not exist." } });
     }
     await logAction(req.user.id, "DEACTIVATE", req.params.id);
+
+    try {
+      const [j] = await pool.query("SELECT user_id, title FROM jobs WHERE id = ?", [req.params.id]);
+      const { emitToUser, emitToAdmin } = require("./events");
+      if (j.length) emitToUser(j[0].user_id, { type: "JOB_STATUS_UPDATED", jobId: req.params.id, status: "CLOSED", title: j[0].title });
+      emitToAdmin({ type: "JOB_STATUS_UPDATED", jobId: req.params.id, status: "CLOSED" });
+    } catch (_) {}
+
     res.json({ success: true, message: "The job posting has been successfully closed and deactivated." });
   } catch (err) {
     next(err);

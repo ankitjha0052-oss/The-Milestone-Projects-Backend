@@ -293,6 +293,22 @@ router.patch("/users/:id/deactivate", guard, async (req, res, next) => {
       closedJobs = r.affectedRows;
     }
     await logAction(req.user.id, "USER_DEACTIVATE", `${req.params.id} (closed jobs: ${closedJobs})`);
+
+    // SSE Real-Time Event Dispatch: Instantly log out the deactivated user in real-time
+    try {
+      const { emitToUser, emitToAdmin } = require("./events");
+      emitToUser(req.params.id, {
+        type: "FORCE_LOGOUT",
+        reason: "ACCOUNT_DEACTIVATED",
+        message: "Your account has been deactivated by administration. Please contact support at info@themilestoneprojects.co.in."
+      });
+      emitToAdmin({
+        type: "USER_STATUS_UPDATED",
+        userId: req.params.id,
+        is_active: false
+      });
+    } catch (_) {}
+
     res.json({ success: true, closedJobs, message: "User account deactivated successfully." });
   } catch (err) {
     next(err);
@@ -305,6 +321,16 @@ router.patch("/users/:id/activate", guard, async (req, res, next) => {
     const [r] = await pool.query("UPDATE users SET is_active = TRUE WHERE id = ? AND role = 'user'", [req.params.id]);
     if (r.affectedRows === 0) return res.status(404).json({ error: { code: "NOT_FOUND", message: "User account could not be found." } });
     await logAction(req.user.id, "USER_ACTIVATE", req.params.id);
+
+    try {
+      const { emitToAdmin } = require("./events");
+      emitToAdmin({
+        type: "USER_STATUS_UPDATED",
+        userId: req.params.id,
+        is_active: true
+      });
+    } catch (_) {}
+
     res.json({ success: true, message: "User account activated successfully." });
   } catch (err) {
     next(err);

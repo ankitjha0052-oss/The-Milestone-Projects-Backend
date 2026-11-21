@@ -200,6 +200,7 @@ async function findOrCreateUserWithIdentity(profile) {
     );
 
     let finalUserId;
+    let isNewUser = false;
 
     if (identities.length > 0) {
       const existing = identities[0];
@@ -255,7 +256,7 @@ async function findOrCreateUserWithIdentity(profile) {
       }
 
       finalUserId = existingUserId;
-
+      isNewUser = !finalUserId;
       if (!finalUserId) {
         // Create new user
         finalUserId = crypto.randomUUID();
@@ -292,6 +293,18 @@ async function findOrCreateUserWithIdentity(profile) {
     await connection.commit();
 
     const [createdUser] = await pool.query("SELECT * FROM users WHERE id = ?", [finalUserId]);
+
+    // Real-Time SSE Dispatch: notify Super Admin about new employer/candidate registration
+    if (isNewUser && createdUser.length > 0) {
+      try {
+        const { emitToAdmin } = require("./events");
+        emitToAdmin({
+          type: createdUser[0].user_type === 'employer' ? "NEW_EMPLOYER" : "NEW_CANDIDATE",
+          user: { id: finalUserId, name: createdUser[0].name, email: createdUser[0].email, user_type: createdUser[0].user_type }
+        });
+      } catch (_) {}
+    }
+
     return formatUserResponse(createdUser[0]);
   } catch (err) {
     await connection.rollback();
